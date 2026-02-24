@@ -125,7 +125,7 @@ const props = defineProps({
 })
 
 // 定义事件
-const emit = defineEmits(['tabChange', 'mapTypeChange', 'sidebarWidthChange'])
+const emit = defineEmits(['tabChange', 'mapTypeChange', 'sidebarWidthChange', 'diseaseTypeChange'])
 
 // 功能设置数据
 const mapType = ref('normal')
@@ -137,6 +137,11 @@ const autoSave = ref(true)
 // 监听地图类型变化
 watch(mapType, (newType) => {
   emit('mapTypeChange', newType)
+})
+
+// 监听病害类型变化
+watch(diseaseType, (newType) => {
+  emit('diseaseTypeChange', newType)
 })
 
 // API数据

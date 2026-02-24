@@ -64,6 +64,10 @@ const props = defineProps({
     type: String,
     default: 'normal'
   },
+  diseaseType: {
+    type: String,
+    default: 'all'
+  },
   sidebarWidth: {
     type: Number,
     default: 300
@@ -87,12 +91,21 @@ const diseaseRecords = ref([])
 // 存储所有标记点
 const markers = ref([])
 
+// 存储筛选后的标记点
+const filteredMarkers = ref([])
+
 // 标记点聚合组
 let markerClusterGroup = null
 
 // 悬浮窗状态
 const floatingWindowVisible = ref(false)
 const selectedDisease = ref(null)
+
+// 监听病害类型变化，重新筛选标记点
+watch(() => props.diseaseType, (newType) => {
+  console.log('病害类型变化:', newType)
+  filterMarkersByType(newType)
+})
 
 // 创建带图片缩略图的标记点图标
 const createThumbnailMarker = (recordId, diseaseType) => {
@@ -207,6 +220,53 @@ const loadDiseaseRecords = async () => {
   }
 };
 
+// 根据病害类型筛选标记点
+const filterMarkersByType = (type) => {
+  console.log(`开始筛选标记点，类型: ${type}`);
+  
+  // 先清除地图上的所有标记点
+  if (markerClusterGroup && map) {
+    map.removeLayer(markerClusterGroup);
+    markerClusterGroup.clearLayers();
+  }
+  
+  // 根据类型筛选标记点
+  if (type === 'all') {
+    // 显示所有标记点
+    filteredMarkers.value = [...markers.value];
+  } else {
+    // 只显示指定类型的标记点
+    filteredMarkers.value = markers.value.filter(marker => {
+      const record = marker.options.record;
+      return record && record.type === type;
+    });
+  }
+  
+  console.log(`筛选结果: 总共 ${markers.value.length} 个标记点，筛选后 ${filteredMarkers.value.length} 个`);
+  
+  // 重新创建聚合组
+  if (!markerClusterGroup) {
+    markerClusterGroup = L.markerClusterGroup({
+      chunkedLoading: true,
+      maxClusterRadius: 80,
+      spiderfyOnMaxZoom: true,
+      showCoverageOnHover: false,
+      zoomToBoundsOnClick: true,
+      iconCreateFunction: createClusterIcon
+    });
+  }
+  
+  // 将筛选后的标记点添加到聚合组
+  filteredMarkers.value.forEach(marker => {
+    markerClusterGroup.addLayer(marker);
+  });
+  
+  // 将聚合组添加到地图
+  if (map && markerClusterGroup) {
+    map.addLayer(markerClusterGroup);
+  }
+};
+
 // 在地图上添加标记点
 const addMarkersToMap = () => {
   // 先清除现有的标记点
@@ -267,6 +327,9 @@ const addMarkersToMap = () => {
   }
   
   console.log(`总共添加了 ${markers.value.length} 个标记点`);
+  
+  // 初始筛选标记点
+  filterMarkersByType(props.diseaseType);
 };
 
 // 清除所有标记点

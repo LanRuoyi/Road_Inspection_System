@@ -26,6 +26,7 @@
           :active-tab="activeTab" 
           @tab-change="handleTabChange"
           @map-type-change="handleMapTypeChange"
+          @disease-type-change="handleDiseaseTypeChange"
           :collapsed="isCollapsed"
         />
       </el-aside>
@@ -42,6 +43,7 @@
           <MapContainer 
           :sidebar-collapsed="isCollapsed" 
           :map-type="currentMapType" 
+          :disease-type="currentDiseaseType"
           :sidebar-width="isCollapsed ? getCollapsedWidth() : sidebarWidth"
         />
         </div>
@@ -96,6 +98,9 @@ const calculateSidebarWidth = () => {
 // 地图类型
 const currentMapType = ref('normal')
 
+// 当前病害类型
+const currentDiseaseType = ref('all')
+
 // 计算折叠后的侧边栏宽度（基于视口宽度）
 const getCollapsedWidth = () => {
   return Math.max(64, window.innerWidth * 0.04) // 4vw，最小64px
@@ -107,8 +112,13 @@ const handleTabChange = (tabName) => {
 }
 
 // 处理地图类型变化
-const handleMapTypeChange = (mapType) => {
-  currentMapType.value = mapType
+const handleMapTypeChange = (type) => {
+  currentMapType.value = type
+}
+
+// 处理病害类型变化
+const handleDiseaseTypeChange = (type) => {
+  currentDiseaseType.value = type
 }
 
 // 切换侧边栏折叠状态
