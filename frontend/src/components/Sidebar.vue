@@ -30,6 +30,11 @@
           <el-icon><Setting /></el-icon>
           <span class="menu-text" :class="{ 'collapsed': collapsed }">参数配置</span>
         </el-menu-item>
+
+        <el-menu-item index="data-transfer">
+          <el-icon><Upload /></el-icon>
+          <span class="menu-text" :class="{ 'collapsed': collapsed }">回传管理</span>
+        </el-menu-item>
       </el-menu>
     </div>
     
@@ -162,6 +167,15 @@
           <el-button type="primary" size="small" style="width: 100%">保存配置</el-button>
         </div>
       </div>
+
+      <div v-else-if="activeTab === 'data-transfer'" class="function-content">
+        <h4>回传管理</h4>
+        <el-divider />
+        <div class="setting-item vertical-item">
+          <span class="label">说明：</span>
+          <span style="font-size: 12px; color: #888; line-height: 1.5;">在主面板中查看本地记录、无人机清单并发起回传。</span>
+        </div>
+      </div>
     </div>
   </div>
 </template>
@@ -173,7 +187,8 @@ import {
   MapLocation,
   VideoCamera,
   Setting,
-  VideoPlay
+  VideoPlay,
+  Upload
 } from '@element-plus/icons-vue'
 import {
   fetchMapTypes,

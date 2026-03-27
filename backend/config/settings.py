@@ -1,15 +1,20 @@
 # config/settings.py
 
+from pathlib import Path
+
+# 项目根目录，统一构建相对路径，避免启动目录不同导致找不到文件
+BASE_DIR = Path(__file__).resolve().parent.parent
+
 # 地图配置
 # 高德地图瓦片地址（支持中国境内，坐标系为GCJ-02）
-AMAP_TILE_URL = 'http://webrd02.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}'
+AMAP_TILE_URL = "http://webrd02.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}"
 
 # 默认中心点（大致位置，后期可由系统定位覆盖）
 DEFAULT_LOCATION = [39.9042, 116.4074]  # 北京
 
 # 离线缓存路径
-TILE_CACHE_DIR = "./cache/tiles"
-DATA_PATH = "./data/records"
+TILE_CACHE_DIR = BASE_DIR / "cache" / "tiles"
+DATA_PATH = BASE_DIR / "data" / "records"
 
 # 地图类型配置
 MAP_TYPES = [

@@ -38,7 +38,6 @@
 
 <script setup>
 import { ref, onMounted, onUnmounted, watch, nextTick } from 'vue'
-import axios from 'axios'
 import L from 'leaflet'
 
 // 解决插件依赖全局L的问题
@@ -62,12 +61,8 @@ import * as LeafletMarkerCluster from 'leaflet.markercluster'
 
 // 正确导入 MarkerClusterGroup
 const MarkerClusterGroup = LeafletMarkerCluster.default || LeafletMarkerCluster
-import {
-  ZoomIn,
-  ZoomOut,
-  Refresh
-} from '@element-plus/icons-vue'
-import { fetchMapTypes, fetchDiseaseImages, fetchRecords, apiClient } from '../api';
+import { ZoomIn, ZoomOut, Refresh } from '@element-plus/icons-vue'
+import { fetchMapTypes, fetchRecords, apiClient } from '../api';
 import FloatingWindow from './FloatingWindow.vue';
 
 // 组件属性

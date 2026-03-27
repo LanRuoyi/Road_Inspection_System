@@ -7,7 +7,6 @@ const apiClient = axios.create({
 
 export const fetchMapTypes = () => apiClient.get('/map-types');
 export const fetchDiseaseTypes = () => apiClient.get('/disease-types');
-export const fetchDiseaseImages = () => apiClient.get('/disease-images');
 export const fetchRecords = () => apiClient.get('/records');
 
 export const connectROS = (payload) => apiClient.post('/ros/connect', payload);
@@ -29,6 +28,13 @@ export const fetchROSMessages = (topicNames = []) => apiClient.get('/ros/message
   params: {
     topics: topicNames.join(',')
   }
+});
+
+export const fetchLocalUAVRecords = () => apiClient.get('/uav/local-records');
+export const fetchUAVDevices = () => apiClient.get('/uav/devices');
+export const fetchUAVDeviceManifest = (deviceId) => apiClient.get(`/uav/devices/${encodeURIComponent(deviceId)}/manifest`);
+export const startUAVPullTransfer = (deviceId, itemIds = []) => apiClient.post(`/uav/devices/${encodeURIComponent(deviceId)}/pull-start`, {
+  item_ids: itemIds
 });
 
 export const buildROSWebSocketUrl = () => {

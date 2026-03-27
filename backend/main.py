@@ -4,7 +4,12 @@ import cv2
 import io
 import asyncio
 import time
+import json
+import hashlib
+from pathlib import Path
+from threading import Lock
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import Request
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Any, Dict, List, Optional
@@ -61,6 +66,52 @@ class ROSSubscribeTopic(BaseModel):
 
 class ROSBatchSubscribeRequest(BaseModel):
     topics: List[ROSSubscribeTopic]
+
+
+class UploadInitRequest(BaseModel):
+    item_id: str
+    file_name: str
+    file_size: int
+    file_sha256: str
+
+
+class UploadCompleteRequest(BaseModel):
+    item_id: str
+    file_name: str
+    json_file_name: str
+    json_payload: Dict[str, Any]
+
+
+class DeviceManifestRequest(BaseModel):
+    device_id: str
+    items: List[Dict[str, Any]]
+
+
+class PullStartRequest(BaseModel):
+    item_ids: List[str]
+
+
+class PullAckRequest(BaseModel):
+    item_ids: List[str]
+
+
+UPLOAD_TMP_DIR = DATA_PATH.parent / "upload_tmp"
+UPLOAD_TMP_DIR.mkdir(parents=True, exist_ok=True)
+upload_sessions: Dict[str, Dict[str, Any]] = {}
+upload_lock = Lock()
+device_manifests: Dict[str, Dict[str, Any]] = {}
+device_pull_tasks: Dict[str, List[str]] = {}
+
+
+def _compute_sha256(file_path: Path) -> str:
+    hasher = hashlib.sha256()
+    with open(file_path, "rb") as f:
+        while True:
+            chunk = f.read(1024 * 1024)
+            if not chunk:
+                break
+            hasher.update(chunk)
+    return hasher.hexdigest()
 
 def init_data():
     """初始化时加载所有 JSON 记录"""
@@ -411,6 +462,216 @@ async def ros_topics_websocket_http_fallback():
         "message": "This endpoint requires WebSocket upgrade.",
         "hint": "Install websockets support: pip install \"uvicorn[standard]\" or pip install websockets wsproto",
     }
+
+
+@app.post("/api/uav/upload/init")
+async def uav_upload_init(request: UploadInitRequest):
+    if request.file_size < 0:
+        raise HTTPException(status_code=400, detail="invalid file_size")
+
+    upload_id = f"{request.item_id}_{request.file_sha256[:8]}"
+    tmp_path = UPLOAD_TMP_DIR / f"{upload_id}.part"
+
+    with upload_lock:
+        upload_sessions[upload_id] = {
+            "item_id": request.item_id,
+            "file_name": request.file_name,
+            "file_size": request.file_size,
+            "file_sha256": request.file_sha256,
+            "tmp_path": str(tmp_path),
+        }
+
+    if not tmp_path.exists():
+        tmp_path.touch()
+
+    return {
+        "ok": True,
+        "upload_id": upload_id,
+        "received_size": tmp_path.stat().st_size,
+    }
+
+
+@app.get("/api/uav/upload/status/{upload_id}")
+async def uav_upload_status(upload_id: str):
+    with upload_lock:
+        session = upload_sessions.get(upload_id)
+
+    if not session:
+        raise HTTPException(status_code=404, detail="upload_id not found")
+
+    tmp_path = Path(session["tmp_path"])
+    return {
+        "ok": True,
+        "upload_id": upload_id,
+        "received_size": tmp_path.stat().st_size if tmp_path.exists() else 0,
+        "file_size": session["file_size"],
+    }
+
+
+@app.patch("/api/uav/upload/chunk/{upload_id}")
+async def uav_upload_chunk(upload_id: str, offset: int, request: Request):
+    with upload_lock:
+        session = upload_sessions.get(upload_id)
+
+    if not session:
+        raise HTTPException(status_code=404, detail="upload_id not found")
+
+    tmp_path = Path(session["tmp_path"])
+    if not tmp_path.exists():
+        tmp_path.touch()
+
+    current_size = tmp_path.stat().st_size
+    if offset != current_size:
+        raise HTTPException(status_code=409, detail={"received_size": current_size})
+
+    body = await request.body()
+    if not body:
+        raise HTTPException(status_code=400, detail="empty chunk")
+
+    with open(tmp_path, "ab") as f:
+        f.write(body)
+
+    return {
+        "ok": True,
+        "upload_id": upload_id,
+        "received_size": tmp_path.stat().st_size,
+    }
+
+
+@app.post("/api/uav/upload/complete/{upload_id}")
+async def uav_upload_complete(upload_id: str, request: UploadCompleteRequest):
+    with upload_lock:
+        session = upload_sessions.get(upload_id)
+
+    if not session:
+        raise HTTPException(status_code=404, detail="upload_id not found")
+
+    tmp_path = Path(session["tmp_path"])
+    if not tmp_path.exists():
+        raise HTTPException(status_code=400, detail="upload temp file missing")
+
+    if tmp_path.stat().st_size != session["file_size"]:
+        raise HTTPException(status_code=400, detail="incomplete upload")
+
+    sha256_actual = _compute_sha256(tmp_path)
+    if sha256_actual.lower() != str(session["file_sha256"]).lower():
+        raise HTTPException(status_code=400, detail="sha256 mismatch")
+
+    final_img_path = DATA_PATH / request.file_name
+    final_json_path = DATA_PATH / request.json_file_name
+
+    DATA_PATH.mkdir(parents=True, exist_ok=True)
+    tmp_path.replace(final_img_path)
+
+    with open(final_json_path, "w", encoding="utf-8") as f:
+        json.dump(request.json_payload, f, ensure_ascii=False, indent=2)
+
+    # 同步更新内存记录，便于前端地图无需重启即可看到新数据
+    if isinstance(request.json_payload, dict):
+        lat = request.json_payload.get("lat")
+        lon = request.json_payload.get("lon")
+        if isinstance(lat, (int, float)) and isinstance(lon, (int, float)):
+            file_id = Path(request.file_name).stem
+            records_store[file_id] = {
+                "lat": float(lat),
+                "lon": float(lon),
+                "img_path": str(final_img_path),
+                "type": request.json_payload.get("type", "Unknown"),
+                "bbox": request.json_payload.get("bbox", []),
+                "count": 1,
+            }
+
+    with upload_lock:
+        upload_sessions.pop(upload_id, None)
+
+    return {
+        "ok": True,
+        "item_id": request.item_id,
+        "image": str(final_img_path),
+        "json": str(final_json_path),
+    }
+
+
+@app.get("/api/uav/local-records")
+async def uav_local_records():
+    DATA_PATH.mkdir(parents=True, exist_ok=True)
+    records = []
+    for json_file in sorted(DATA_PATH.glob("*.json")):
+        image_file = json_file.with_suffix(".jpg")
+        item = {
+            "item_id": json_file.stem,
+            "json_file": str(json_file),
+            "image_file": str(image_file) if image_file.exists() else None,
+            "has_image": image_file.exists(),
+            "metadata": {},
+        }
+        try:
+            with open(json_file, "r", encoding="utf-8-sig") as f:
+                item["metadata"] = json.load(f)
+        except Exception:
+            item["metadata"] = {}
+        records.append(item)
+    return {
+        "ok": True,
+        "count": len(records),
+        "records": records,
+    }
+
+
+@app.get("/api/uav/devices")
+async def uav_devices():
+    devices = sorted(device_manifests.keys())
+    return {"ok": True, "devices": devices}
+
+
+@app.post("/api/uav/devices/{device_id}/manifest")
+async def uav_device_manifest(device_id: str, request: DeviceManifestRequest):
+    if request.device_id != device_id:
+        raise HTTPException(status_code=400, detail="device_id mismatch")
+
+    device_manifests[device_id] = {
+        "updated_at": time.time(),
+        "items": request.items,
+    }
+    device_pull_tasks.setdefault(device_id, [])
+    return {"ok": True, "device_id": device_id, "count": len(request.items)}
+
+
+@app.get("/api/uav/devices/{device_id}/manifest")
+async def uav_get_device_manifest(device_id: str):
+    data = device_manifests.get(device_id, {"updated_at": 0, "items": []})
+    return {
+        "ok": True,
+        "device_id": device_id,
+        "updated_at": data.get("updated_at", 0),
+        "items": data.get("items", []),
+    }
+
+
+@app.post("/api/uav/devices/{device_id}/pull-start")
+async def uav_pull_start(device_id: str, request: PullStartRequest):
+    pending = device_pull_tasks.setdefault(device_id, [])
+    known = set(pending)
+    for item_id in request.item_ids:
+        if item_id not in known:
+            pending.append(item_id)
+            known.add(item_id)
+    return {"ok": True, "device_id": device_id, "pending_count": len(pending)}
+
+
+@app.get("/api/uav/devices/{device_id}/pull-tasks")
+async def uav_pull_tasks(device_id: str):
+    pending = device_pull_tasks.get(device_id, [])
+    return {"ok": True, "device_id": device_id, "item_ids": pending}
+
+
+@app.post("/api/uav/devices/{device_id}/pull-ack")
+async def uav_pull_ack(device_id: str, request: PullAckRequest):
+    pending = device_pull_tasks.get(device_id, [])
+    ack_set = set(request.item_ids)
+    remained = [item_id for item_id in pending if item_id not in ack_set]
+    device_pull_tasks[device_id] = remained
+    return {"ok": True, "device_id": device_id, "pending_count": len(remained)}
 
 if __name__ == "__main__":
     import uvicorn

@@ -66,6 +66,10 @@
             <el-empty description="参数配置功能开发中" />
           </div>
         </div>
+
+        <div v-else-if="activeTab === 'data-transfer'" class="content-area">
+          <DataTransferManager :ros-connected="rosConnected" />
+        </div>
       </el-main>
     </el-container>
   </div>
@@ -76,7 +80,7 @@ import { ref, onMounted, onUnmounted } from 'vue'
 import Sidebar from './components/Sidebar.vue'
 import MapContainer from './components/MapContainer.vue'
 import ROSRealtimeViewer from './components/ROSRealtimeViewer.vue'
-import { Expand, Fold } from '@element-plus/icons-vue'
+import DataTransferManager from './components/DataTransferManager.vue'
 
 // 当前激活的功能标签
 const activeTab = ref('disease-distribution')

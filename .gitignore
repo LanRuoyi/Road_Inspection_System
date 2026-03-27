@@ -26,4 +26,6 @@ dist-ssr
 
 # 其他文件
 *.txt
+!requirements.txt
 data
+
