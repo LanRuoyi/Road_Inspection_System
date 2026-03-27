@@ -40,8 +40,24 @@
 import { ref, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import axios from 'axios'
 import L from 'leaflet'
+
+// 解决插件依赖全局L的问题
+if (typeof window !== 'undefined') {
+  window.L = L
+
+  // 修复 Canvas willReadFrequently 警告
+  const originalGetContext = HTMLCanvasElement.prototype.getContext;
+  HTMLCanvasElement.prototype.getContext = function(type, attributes) {
+    if (type === '2d') {
+      attributes = { ...attributes, willReadFrequently: true };
+    }
+    return originalGetContext.call(this, type, attributes);
+  };
+}
+
 import 'leaflet/dist/leaflet.css'
 import 'leaflet.markercluster';
+import 'leaflet.heat'; 
 import * as LeafletMarkerCluster from 'leaflet.markercluster'
 
 // 正确导入 MarkerClusterGroup
@@ -68,6 +84,10 @@ const props = defineProps({
     type: String,
     default: 'all'
   },
+  showHeatmap: {
+    type: Boolean,
+    default: false
+  },
   sidebarWidth: {
     type: Number,
     default: 300
@@ -77,6 +97,8 @@ const props = defineProps({
 // 地图实例
 let map = null
 let currentLayer = null
+let heatLayer = null // 热力图层
+let heatBgLayer = null // 新增：热力图背景层
 
 // 当前坐标
 const currentLng = ref(116.3974)
@@ -112,11 +134,6 @@ const createThumbnailMarker = (recordId, diseaseType) => {
   // 使用API基础URL构建图片URL
   const imageUrl = `${apiClient.defaults.baseURL}/image/${recordId}`;
   
-  // 使用相对单位（vw）定义尺寸
-  const squareSize = '4vw'; // 正方形大小（相对于视口宽度）
-  const triangleHeight = '1.5vw'; // 三角形高度
-  const totalHeight = `calc(${squareSize} + ${triangleHeight})`;
-  
   // 标记点HTML结构：上面是正方形图片，下面是指向三角形
   const html = `
     <div class="thumbnail-marker">
@@ -130,8 +147,9 @@ const createThumbnailMarker = (recordId, diseaseType) => {
   return L.divIcon({
     html: html,
     className: 'thumbnail-marker-container',
-    iconSize: [80, 100], // 使用固定像素作为基础尺寸，CSS会覆盖
-    iconAnchor: [40, 90] // 锚点在三角形顶点
+    iconSize: [50, 60], // 固定尺寸：宽50px，高60px (50px正方形 + 10px三角形)
+    iconAnchor: [25, 60], // 锚点：X轴居中(25)，Y轴最底部(60) -> 确保三角形尖端对准坐标
+    popupAnchor: [0, -60] // 弹窗位置：顶部上方
   });
 };
 
@@ -185,8 +203,8 @@ const createClusterIcon = (cluster) => {
   return L.divIcon({
     html: html,
     className: 'thumbnail-marker-container',
-    iconSize: [80, 100], // 使用与离散标记点相同的尺寸
-    iconAnchor: [40, 90] // 锚点在三角形顶点
+    iconSize: [50, 60], // 固定尺寸：与普通标记点一致
+    iconAnchor: [25, 60] // 锚点：X轴居中(25)，Y轴最底部(60) -> 确保三角形尖端对准坐标
   });
 };
 
@@ -263,9 +281,137 @@ const filterMarkersByType = (type) => {
   
   // 将聚合组添加到地图
   if (map && markerClusterGroup) {
-    map.addLayer(markerClusterGroup);
+    // 如果热力图未开启，显示标记点
+    if (!props.showHeatmap) {
+      map.addLayer(markerClusterGroup);
+    }
   }
+
+  // 总是更新图层可见性以处理筛选后的热力图显示
+  updateLayersVisibility();
 };
+
+// 更新图层显隐（控制 Marker 和 热力图）
+const updateLayersVisibility = () => {
+  if (!map) return;
+
+  // 1. 处理热力图
+  if (props.showHeatmap) {
+    // 清理旧层
+    if (heatLayer) {
+      map.removeLayer(heatLayer);
+      heatLayer = null;
+    }
+    if (heatBgLayer) {
+      map.removeLayer(heatBgLayer);
+      heatBgLayer = null;
+    }
+    
+    // 准备热力图数据: [lat, lng, intensity]
+    // 使用 filteredMarkers (筛选后的点)
+    let maxIntensity = 0;
+    const heatData = filteredMarkers.value.map(marker => {
+      // 获取记录信息，marker.options.record 应该包含后端数据
+      const record = marker.options.record;
+      if (!record) return [marker.getLatLng().lat, marker.getLatLng().lng, 1.0];
+      
+      // 使用后端传来的 area 作为权重
+      const intensity = record.area ? record.area : 1.0; 
+      if (intensity > maxIntensity) maxIntensity = intensity;
+
+      return [record.lat, record.lon, intensity];
+    });
+
+    console.log('准备渲染热力图，数据点数量:', heatData.length, '最大权重:', maxIntensity);
+    if (heatData.length > 0) {
+      // 检查L.heatLayer是否存在
+      if (typeof L.heatLayer !== 'function') {
+        console.error('L.heatLayer 未定义，leaflet.heat 插件可能未能正确加载');
+        return;
+      }
+      
+      try {
+        const finalMax = maxIntensity > 0 ? maxIntensity : 1.0;
+
+        // 1. 添加背景层：覆盖全图的半透明蓝色矩形
+        // 确保背景层在热力图之下：创建一个自定义 Pane 或者使用 bringToBack
+        if (!map.getPane('heatBackgroundPane')) {
+            map.createPane('heatBackgroundPane');
+            // TilePane is 200, OverlayPane is 400. 
+            // 设置为 350 保证在地图之上，但在热力图(400)之下
+            map.getPane('heatBackgroundPane').style.zIndex = 350;
+            // 解决鼠标事件穿透问题（防止遮挡底图交互）
+            map.getPane('heatBackgroundPane').style.pointerEvents = 'none'; 
+        }
+
+        const bounds = [[-90, -180], [90, 180]];
+        heatBgLayer = L.rectangle(bounds, {
+          pane: 'heatBackgroundPane', // 指定 Pane
+          color: 'blue',       
+          weight: 0,           
+          fillColor: 'blue',   
+          fillOpacity: 0.3, // 基础底色透明度
+          interactive: false   
+        });
+        heatBgLayer.addTo(map);
+        
+        // 2. 添加热力图层 (默认在 overlayPane, zIndex 400)
+        heatLayer = L.heatLayer(heatData, {
+          radius: 50,      // 增大半径，从 25 -> 50
+          blur: 35,        // 增大模糊，过渡更柔和
+          maxZoom: 18,     // 关键设置：降低此值让热力图在缩小地图时也能保持红色强度（默认是18）
+          max: finalMax * 0.8, // 稍微降低阈值，让红色更容易出现
+          minOpacity: 0.0, // 设为0，让无数据区域完全透明，透出底下的蓝色背景
+          gradient: {
+            // 调整渐变：从透明(底色蓝) -> 浅蓝 -> 绿 -> 黄 -> 红
+            0.0: 'rgba(0,0,255,0)',  // 完全透明，显示背景蓝
+            0.2: 'rgba(0,0,255,0.8)',// 加深蓝
+            0.4: 'cyan',
+            0.6: 'lime', 
+            0.8: 'yellow',
+            1.0: 'red'
+          }
+        });
+        
+        heatLayer.addTo(map);
+        
+        console.log('热力图层及背景已添加到地图');
+           
+      } catch (e) {
+        console.error('创建热力图层失败:', e);
+      }
+    } else {
+        console.warn('热力图数据为空');
+        // 如果数据为空但也想显示蓝色底色，可以在这里解开注释
+        /*
+        const bounds = [[-90, -180], [90, 180]];
+        heatBgLayer = L.rectangle(bounds, {
+          color: 'blue', weight: 0, fillColor: 'blue', fillOpacity: 0.3, interactive: false   
+        });
+        heatBgLayer.addTo(map);
+        */
+    }
+  } else {
+      // 关闭热力图
+      if (heatLayer) {
+        map.removeLayer(heatLayer);
+        heatLayer = null;
+      }
+      if (heatBgLayer) {
+        map.removeLayer(heatBgLayer);
+        heatBgLayer = null;
+      }
+      // 恢复图标显示
+      if (markerClusterGroup && !map.hasLayer(markerClusterGroup) && filteredMarkers.value.length > 0) {
+        map.addLayer(markerClusterGroup);
+      }
+  }
+}
+// 监听热力图开关
+watch(() => props.showHeatmap, (val) => {
+  console.log('热力图开关:', val);
+  updateLayersVisibility();
+});
 
 // 在地图上添加标记点
 const addMarkersToMap = () => {
@@ -276,7 +422,7 @@ const addMarkersToMap = () => {
   if (!markerClusterGroup) {
     markerClusterGroup = L.markerClusterGroup({
       chunkedLoading: true,
-      maxClusterRadius: 80,
+      maxClusterRadius: 20,
       spiderfyOnMaxZoom: true,
       showCoverageOnHover: false,
       zoomToBoundsOnClick: true,
@@ -586,20 +732,15 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   align-items: center;
-  font-size: 1vw; /* 基础字体大小，用于相对单位计算 */
 }
 
 :deep(.marker-square) {
-  width: 3vw; /* 相对于视口宽度 */
-  height: 3vw;
-  min-width: 40px; /* 最小尺寸 */
-  min-height: 40px;
-  max-width: 80px; /* 最大尺寸 */
-  max-height: 80px;
+  width: 50px;
+  height: 50px;
   background: white;
   border: 2px solid #ffffff; /* 白色边框 */
   border-radius: 8px;
-  /* 取消阴影 */
+  box-shadow: 0 2px 6px rgba(0,0,0,0.3);
   overflow: hidden;
   position: relative;
 }
@@ -612,12 +753,12 @@ onUnmounted(() => {
 
 :deep(.disease-badge) {
   position: absolute;
-  top: 0.2vw;
-  right: 0.2vw;
-  background: rgba(255, 255, 255, 0.95); /* 白色背景 */
-  color: #333; /* 深色文字 */
-  font-size: 0.8vw;
-  padding: 0.2vw 0.5vw;
+  top: 2px;
+  right: 2px;
+  background: rgba(255, 255, 255, 0.95);
+  color: #333;
+  font-size: 10px;
+  padding: 1px 4px;
   border-radius: 3px;
   font-weight: bold;
   border: 1px solid #f0f0f0;
@@ -626,10 +767,11 @@ onUnmounted(() => {
 :deep(.marker-triangle) {
   width: 0;
   height: 0;
-  border-left: 1.1vw solid transparent; /* 加宽底部 */
-  border-right: 1.1vw solid transparent;
-  border-top: 0.7vw solid #ffffff; /* 降低高度 */
+  border-left: 8px solid transparent;
+  border-right: 8px solid transparent;
+  border-top: 10px solid #ffffff;
   margin-top: -1px;
+  filter: drop-shadow(0 2px 1px rgba(0,0,0,0.1));
 }
 
 /* 聚合标记点样式 */

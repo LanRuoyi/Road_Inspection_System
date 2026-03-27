@@ -61,6 +61,10 @@
             />
           </el-select>
         </div>
+        <div class="setting-item">
+          <span class="label">热力图：</span>
+          <el-switch v-model="heatmapEnabled" size="small" />
+        </div>
       </div>
       
       <!-- 实时监看功能内容 -->
@@ -68,17 +72,77 @@
         <h4>实时监看设置</h4>
         <el-divider />
         <div class="setting-item">
-          <el-button type="primary" size="small" style="width: 100%">
+          <span class="label">ROS 地址：</span>
+          <div class="inline-fields">
+            <el-input v-model="rosHost" size="small" placeholder="host" style="width: 90px" />
+            <el-input-number
+              v-model="rosPort"
+              size="small"
+              :min="1"
+              :max="65535"
+              :step="1"
+              controls-position="right"
+              style="width: 90px"
+            />
+          </div>
+        </div>
+        <div class="setting-item">
+          <el-button type="primary" size="small" style="width: 49%" @click="handleROSConnect">
             <el-icon><VideoPlay /></el-icon>
-            开始监看
+            连接
+          </el-button>
+          <el-button size="small" style="width: 49%" @click="handleROSDisconnect">
+            断开
           </el-button>
         </div>
         <div class="setting-item">
-          <span class="label">监看设备：</span>
-          <el-select v-model="cameraDevice" size="small" style="width: 120px">
-            <el-option label="摄像头1" value="camera1" />
-            <el-option label="摄像头2" value="camera2" />
+          <span class="label">连接状态：</span>
+          <el-tag :type="rosConnected ? 'success' : 'info'" size="small">
+            {{ rosConnected ? '已连接' : '未连接' }}
+          </el-tag>
+        </div>
+        <div class="setting-item">
+          <span class="label">话题类型：</span>
+          <el-select
+            v-model="selectedTopicType"
+            size="small"
+            style="width: 130px"
+            clearable
+            placeholder="全部"
+            :disabled="!rosConnected"
+          >
+            <el-option
+              v-for="item in rosTopicTypes"
+              :key="item"
+              :label="item"
+              :value="item"
+            />
           </el-select>
+        </div>
+        <div class="setting-item vertical-item">
+          <span class="label">已有话题：</span>
+          <el-select
+            v-model="selectedTopicNames"
+            multiple
+            collapse-tags
+            collapse-tags-tooltip
+            size="small"
+            placeholder="请选择话题"
+            style="width: 100%"
+            :disabled="!rosConnected"
+          >
+            <el-option
+              v-for="topic in rosTopics"
+              :key="topic.name"
+              :label="`${topic.name} (${topic.type})`"
+              :value="topic.name"
+            />
+          </el-select>
+        </div>
+        <div class="setting-item">
+          <el-button type="primary" size="small" style="width: 100%" :disabled="!rosConnected" @click="applySubscriptions">
+            应用订阅
+          </el-button>
         </div>
       </div>
       
@@ -104,14 +168,21 @@
 
 <script setup>
 import { ref, onMounted, watch, onUnmounted } from 'vue'
-import axios from 'axios'
+import { ElMessage } from 'element-plus'
 import {
   MapLocation,
   VideoCamera,
   Setting,
   VideoPlay
 } from '@element-plus/icons-vue'
-import { fetchMapTypes, fetchDiseaseTypes } from '../api'
+import {
+  fetchMapTypes,
+  fetchDiseaseTypes,
+  connectROS,
+  disconnectROS,
+  fetchROSTopicTypes,
+  fetchROSTopics
+} from '../api'
 
 const props = defineProps({
   activeTab: {
@@ -125,14 +196,30 @@ const props = defineProps({
 })
 
 // 定义事件
-const emit = defineEmits(['tabChange', 'mapTypeChange', 'sidebarWidthChange', 'diseaseTypeChange'])
+const emit = defineEmits([
+  'tabChange',
+  'mapTypeChange',
+  'sidebarWidthChange',
+  'diseaseTypeChange',
+  'heatmapChange',
+  'rosConnectionChange',
+  'rosSubscriptionsChange'
+])
 
 // 功能设置数据
 const mapType = ref('normal')
 const diseaseType = ref('all')
-const cameraDevice = ref('camera1')
+const heatmapEnabled = ref(false)
 const sensitivity = ref(5)
 const autoSave = ref(true)
+
+const rosHost = ref('localhost')
+const rosPort = ref(9090)
+const rosConnected = ref(false)
+const rosTopicTypes = ref([])
+const rosTopics = ref([])
+const selectedTopicType = ref('')
+const selectedTopicNames = ref([])
 
 // 监听地图类型变化
 watch(mapType, (newType) => {
@@ -142,6 +229,11 @@ watch(mapType, (newType) => {
 // 监听病害类型变化
 watch(diseaseType, (newType) => {
   emit('diseaseTypeChange', newType)
+})
+
+// 监听热力图状态变化
+watch(heatmapEnabled, (val) => {
+  emit('heatmapChange', val)
 })
 
 // API数据
@@ -161,6 +253,92 @@ const fetchMapAndDiseaseTypes = async () => {
     console.error('获取数据失败:', error);
   }
 };
+
+const fetchROSTopicCatalog = async () => {
+  if (!rosConnected.value) {
+    rosTopicTypes.value = []
+    rosTopics.value = []
+    selectedTopicNames.value = []
+    return
+  }
+
+  try {
+    const [typesResp, topicsResp] = await Promise.all([
+      fetchROSTopicTypes(),
+      fetchROSTopics(selectedTopicType.value)
+    ])
+
+    rosTopicTypes.value = typesResp.data.topic_types || []
+    rosTopics.value = topicsResp.data.topics || []
+
+    const validNames = new Set(rosTopics.value.map(item => item.name))
+    selectedTopicNames.value = selectedTopicNames.value.filter(name => validNames.has(name))
+  } catch (error) {
+    console.error('获取 ROS 话题目录失败:', error)
+    ElMessage.error('获取 ROS 话题目录失败')
+  }
+}
+
+const handleROSConnect = async () => {
+  try {
+    await connectROS({
+      host: rosHost.value,
+      port: Number(rosPort.value)
+    })
+    rosConnected.value = true
+    emit('rosConnectionChange', {
+      connected: true,
+      host: rosHost.value,
+      port: Number(rosPort.value)
+    })
+    await fetchROSTopicCatalog()
+    ElMessage.success('ROS 连接成功')
+  } catch (error) {
+    rosConnected.value = false
+    emit('rosConnectionChange', {
+      connected: false,
+      host: rosHost.value,
+      port: Number(rosPort.value)
+    })
+    console.error('ROS 连接失败:', error)
+    ElMessage.error('ROS 连接失败，请确认 rosbridge 服务可用')
+  }
+}
+
+const handleROSDisconnect = async () => {
+  try {
+    await disconnectROS()
+  } catch (error) {
+    console.error('ROS 断开时发生错误:', error)
+  }
+
+  rosConnected.value = false
+  rosTopicTypes.value = []
+  rosTopics.value = []
+  selectedTopicNames.value = []
+  emit('rosConnectionChange', {
+    connected: false,
+    host: rosHost.value,
+    port: Number(rosPort.value)
+  })
+  emit('rosSubscriptionsChange', [])
+  ElMessage.info('ROS 已断开')
+}
+
+const applySubscriptions = () => {
+  const topicMap = new Map(rosTopics.value.map(item => [item.name, item.type]))
+  const selectedTopics = selectedTopicNames.value
+    .map(name => ({ name, type: topicMap.get(name) }))
+    .filter(item => item.type)
+
+  emit('rosSubscriptionsChange', selectedTopics)
+  ElMessage.success(`已应用 ${selectedTopics.length} 个订阅话题`)
+}
+
+watch(selectedTopicType, async () => {
+  if (!rosConnected.value) return
+  await fetchROSTopicCatalog()
+})
 
 // 生命周期
 onMounted(() => {
@@ -326,6 +504,19 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
+}
+
+.vertical-item {
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.inline-fields {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
 }
 
 .label {

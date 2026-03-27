@@ -27,6 +27,9 @@
           @tab-change="handleTabChange"
           @map-type-change="handleMapTypeChange"
           @disease-type-change="handleDiseaseTypeChange"
+          @heatmap-change="handleHeatmapChange"
+          @ros-connection-change="handleROSConnectionChange"
+          @ros-subscriptions-change="handleROSSubscriptionsChange"
           :collapsed="isCollapsed"
         />
       </el-aside>
@@ -44,15 +47,17 @@
           :sidebar-collapsed="isCollapsed" 
           :map-type="currentMapType" 
           :disease-type="currentDiseaseType"
+          :show-heatmap="showHeatmap"
           :sidebar-width="isCollapsed ? getCollapsedWidth() : sidebarWidth"
         />
         </div>
         
         <!-- 实时监看功能 -->
         <div v-else-if="activeTab === 'real-time-monitor'" class="content-area">
-          <div class="placeholder-content">
-            <el-empty description="实时监看功能开发中" />
-          </div>
+          <ROSRealtimeViewer
+            :ros-connected="rosConnected"
+            :selected-topics="selectedROSTopics"
+          />
         </div>
         
         <!-- 参数配置功能 -->
@@ -70,6 +75,7 @@
 import { ref, onMounted, onUnmounted } from 'vue'
 import Sidebar from './components/Sidebar.vue'
 import MapContainer from './components/MapContainer.vue'
+import ROSRealtimeViewer from './components/ROSRealtimeViewer.vue'
 import { Expand, Fold } from '@element-plus/icons-vue'
 
 // 当前激活的功能标签
@@ -84,7 +90,7 @@ const maxWidth = 400
 // 计算侧边栏宽度（基于视口宽度的相对大小）
 const calculateSidebarWidth = () => {
   // 使用视口宽度的20%作为基础，限制在minWidth和maxWidth之间
-  const baseWidth = window.innerWidth * 0.2
+  const baseWidth = window.innerWidth * 0.15
   const calculatedWidth = Math.max(minWidth, Math.min(maxWidth, baseWidth))
   sidebarWidth.value = calculatedWidth
   // console.log('侧边栏宽度计算:', {
@@ -100,6 +106,13 @@ const currentMapType = ref('normal')
 
 // 当前病害类型
 const currentDiseaseType = ref('all')
+
+// 热力图开关
+const showHeatmap = ref(false)
+
+// ROS 连接状态
+const rosConnected = ref(false)
+const selectedROSTopics = ref([])
 
 // 计算折叠后的侧边栏宽度（基于视口宽度）
 const getCollapsedWidth = () => {
@@ -119,6 +132,22 @@ const handleMapTypeChange = (type) => {
 // 处理病害类型变化
 const handleDiseaseTypeChange = (type) => {
   currentDiseaseType.value = type
+}
+
+// 处理热力图开关变化
+const handleHeatmapChange = (val) => {
+  showHeatmap.value = val
+}
+
+const handleROSConnectionChange = (payload) => {
+  rosConnected.value = Boolean(payload?.connected)
+  if (!rosConnected.value) {
+    selectedROSTopics.value = []
+  }
+}
+
+const handleROSSubscriptionsChange = (topics) => {
+  selectedROSTopics.value = Array.isArray(topics) ? topics : []
 }
 
 // 切换侧边栏折叠状态
