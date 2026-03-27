@@ -207,7 +207,7 @@ const createClusterIcon = (cluster) => {
 const fetchMapTypesData = async () => {
   try {
     const response = await fetchMapTypes();
-    mapTypes.value = response.data;
+    mapTypes.value = Array.isArray(response.data) ? response.data : [];
     if (map) {
       switchMapLayer(props.mapType);
     }
@@ -216,12 +216,38 @@ const fetchMapTypesData = async () => {
   }
 };
 
+const initCenterFromBrowserLocation = async () => {
+  if (!navigator.geolocation) {
+    return;
+  }
+
+  await new Promise((resolve) => {
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        const lat = Number(position?.coords?.latitude);
+        const lon = Number(position?.coords?.longitude);
+        if (Number.isFinite(lat) && Number.isFinite(lon)) {
+          currentLat.value = lat;
+          currentLng.value = lon;
+        }
+        resolve();
+      },
+      () => resolve(),
+      {
+        enableHighAccuracy: false,
+        timeout: 3000,
+        maximumAge: 300000,
+      }
+    );
+  });
+};
+
 // 加载病害记录并在地图上显示标记点
 const loadDiseaseRecords = async () => {
   try {
     console.log('开始加载病害记录...');
     const response = await fetchRecords();
-    diseaseRecords.value = response.data;
+    diseaseRecords.value = Array.isArray(response.data) ? response.data : [];
     console.log('成功加载病害记录:', diseaseRecords.value);
     
     // 在地图上显示标记点
@@ -427,6 +453,10 @@ const addMarkersToMap = () => {
   
   diseaseRecords.value.forEach(record => {
     try {
+      if (!Number.isFinite(record.lat) || !Number.isFinite(record.lon)) {
+        return;
+      }
+
       // 创建标记点（使用缩略图样式）
       const marker = L.marker([record.lat, record.lon], {
         icon: createThumbnailMarker(record.id, record.type),
@@ -552,17 +582,8 @@ const initMap = () => {
       zoomControl: false
     })
 
-    // 添加默认图层（使用默认配置）
-    const defaultLayer = L.tileLayer(
-      'https://webrd01.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}',
-      {
-        subdomains: ['1', '2', '3', '4'],
-        attribution: '&copy; <a href="https://www.amap.com/">高德地图</a>'
-      }
-    )
-    
-    defaultLayer.addTo(map)
-    currentLayer = defaultLayer
+    // 使用后端配置初始化底图图层
+    switchMapLayer(props.mapType)
 
     // 添加缩放控件
     L.control.zoom({
@@ -656,7 +677,8 @@ watch(() => props.mapType, (newType) => {
 onMounted(() => {
   console.log('MapContainer组件已挂载')
   // 先获取配置，再初始化地图
-  fetchMapTypesData().then(() => {
+  fetchMapTypesData().then(async () => {
+    await initCenterFromBrowserLocation()
     // 配置获取完成后初始化地图
     initMap()
     

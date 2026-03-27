@@ -11,15 +11,15 @@
       <div class="info-section">
         <div class="info-item">
           <span class="label">病害类型：</span>
-          <span class="value">{{ data.type }}</span>
+          <span class="value">{{ safeType }}</span>
         </div>
         <div class="info-item">
           <span class="label">位置：</span>
-          <span class="value">{{ data.lat.toFixed(6) }}, {{ data.lon.toFixed(6) }}</span>
+          <span class="value">{{ safeLatLon }}</span>
         </div>
         <div class="info-item">
           <span class="label">ID：</span>
-          <span class="value">{{ data.id }}</span>
+          <span class="value">{{ safeId }}</span>
         </div>
       </div>
       
@@ -53,8 +53,33 @@ const props = defineProps({
 
 const emit = defineEmits(['close'])
 
+const safeType = computed(() => {
+  const t = props.data?.type
+  if (typeof t === 'string' && t.trim()) {
+    return t.trim()
+  }
+  return 'Unknown'
+})
+
+const safeId = computed(() => {
+  const v = props.data?.id
+  return v == null ? '-' : String(v)
+})
+
+const safeLatLon = computed(() => {
+  const lat = Number(props.data?.lat)
+  const lon = Number(props.data?.lon)
+  if (Number.isFinite(lat) && Number.isFinite(lon)) {
+    return `${lat.toFixed(6)}, ${lon.toFixed(6)}`
+  }
+  return '-'
+})
+
 // 图片URL
 const imageUrl = computed(() => {
+  if (props.data?.id == null) {
+    return ''
+  }
   return `${apiClient.defaults.baseURL}/image/${props.data.id}`
 })
 

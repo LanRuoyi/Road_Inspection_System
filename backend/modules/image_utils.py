@@ -21,6 +21,20 @@ def draw_bbox_on_image(image_path, bbox, label):
         x, y, w, h = [int(v) for v in bbox]
     except Exception:
         return img
+
+    if w <= 0 or h <= 0:
+        return img
+
+    # 坐标裁剪，避免越界
+    h_img, w_img = img.shape[:2]
+    x = max(0, min(x, w_img - 1))
+    y = max(0, min(y, h_img - 1))
+    w = max(1, min(w, w_img - x))
+    h = max(1, min(h, h_img - y))
+
+    label_text = str(label).strip() if label is not None else "Unknown"
+    if not label_text:
+        label_text = "Unknown"
         
     color = (0, 0, 255)  # BGR 格式：红色
     
@@ -60,7 +74,7 @@ def draw_bbox_on_image(image_path, bbox, label):
         font = ImageFont.load_default()
     
     # 绘制文本背景（增强可读性）
-    text_bbox = draw.textbbox((x, y - 30), label, font=font)
+    text_bbox = draw.textbbox((x, y - 30), label_text, font=font)
     text_width = text_bbox[2] - text_bbox[0]
     text_height = text_bbox[3] - text_bbox[1]
     
@@ -75,7 +89,7 @@ def draw_bbox_on_image(image_path, bbox, label):
     
     # 绘制中文文本
     text_color = (255, 255, 255)  # 白色文本
-    draw.text((x + 5, y - 30 - text_height + 5), label, fill=text_color, font=font)
+    draw.text((x + 5, y - 30 - text_height + 5), label_text, fill=text_color, font=font)
     
     # 转换回OpenCV格式
     img = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)

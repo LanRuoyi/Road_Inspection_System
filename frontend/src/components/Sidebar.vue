@@ -228,7 +228,7 @@ const heatmapEnabled = ref(false)
 const sensitivity = ref(5)
 const autoSave = ref(true)
 
-const rosHost = ref('localhost')
+const rosHost = ref('100.68.153.103')
 const rosPort = ref(9090)
 const rosConnected = ref(false)
 const rosTopicTypes = ref([])
@@ -257,17 +257,14 @@ const diseaseTypes = ref([])
 
 // 获取地图和病害类型数据
 const fetchMapAndDiseaseTypes = async () => {
-  try {
-    const [mapResponse, diseaseResponse] = await Promise.all([
-      fetchMapTypes(),
-      fetchDiseaseTypes()
-    ]);
-    mapTypes.value = mapResponse.data;
-    diseaseTypes.value = diseaseResponse.data;
-  } catch (error) {
-    console.error('获取数据失败:', error);
-  }
-};
+  const [mapResponse, diseaseResponse] = await Promise.all([
+    fetchMapTypes(),
+    fetchDiseaseTypes()
+  ])
+
+  mapTypes.value = Array.isArray(mapResponse.data) ? mapResponse.data : []
+  diseaseTypes.value = Array.isArray(diseaseResponse.data) ? diseaseResponse.data : []
+}
 
 const fetchROSTopicCatalog = async () => {
   if (!rosConnected.value) {

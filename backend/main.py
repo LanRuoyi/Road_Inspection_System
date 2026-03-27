@@ -6,6 +6,7 @@ import asyncio
 import time
 import json
 import hashlib
+import math
 from pathlib import Path
 from threading import Lock
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -56,7 +57,7 @@ ros_manager = ROSManager()
 
 
 class ROSConnectRequest(BaseModel):
-    host: str = "localhost"
+    host: str = "100.68.153.103"
     port: int = 9090
 
 class ROSSubscribeTopic(BaseModel):
@@ -113,14 +114,148 @@ def _compute_sha256(file_path: Path) -> str:
             hasher.update(chunk)
     return hasher.hexdigest()
 
+
+def _safe_float(v: Any) -> Optional[float]:
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        return None
+    try:
+        return float(v)
+    except Exception:
+        return None
+
+
+def _strip_type(v: Any, default: str = "Unknown") -> str:
+    if isinstance(v, str):
+        s = v.strip()
+        if s:
+            return s
+    return default
+
+
+def _extract_type_bbox_from_payload(payload: Dict[str, Any]) -> tuple[str, List[float]]:
+    disease_type = _strip_type(payload.get("type"), "Unknown")
+
+    bbox = payload.get("bbox")
+    if isinstance(bbox, list) and len(bbox) >= 4:
+        try:
+            return disease_type, [float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])]
+        except Exception:
+            pass
+
+    detection = payload.get("detection")
+    if not isinstance(detection, dict):
+        return disease_type, []
+
+    targets = detection.get("targets")
+    if not isinstance(targets, list):
+        return disease_type, []
+
+    for target in targets:
+        if not isinstance(target, dict):
+            continue
+        target_type = _strip_type(target.get("type"), disease_type)
+        rois = target.get("rois")
+        if not isinstance(rois, list):
+            continue
+        for roi in rois:
+            if not isinstance(roi, dict):
+                continue
+            rect = roi.get("rect")
+            if not isinstance(rect, dict):
+                continue
+            try:
+                x = float(rect.get("x_offset", 0) or 0)
+                y = float(rect.get("y_offset", 0) or 0)
+                w = float(rect.get("width", 0) or 0)
+                h = float(rect.get("height", 0) or 0)
+            except Exception:
+                continue
+            if w > 0 and h > 0:
+                roi_type = _strip_type(roi.get("type"), target_type)
+                return roi_type, [x, y, w, h]
+
+    return disease_type, []
+
+
+def _normalize_uploaded_payload(payload: Any, item_id: str, file_name: str) -> Dict[str, Any]:
+    if not isinstance(payload, dict):
+        payload = {}
+
+    detection = payload.get("detection")
+    if not isinstance(detection, dict):
+        detection = {
+            "header": {"stamp": {"sec": 0, "nanosec": 0}, "frame_id": ""},
+            "fps": 0,
+            "perfs": [],
+            "targets": [],
+            "disappeared_targets": [],
+        }
+
+    flight_state = payload.get("flight_state")
+    if not isinstance(flight_state, dict):
+        flight_state = {
+            "connected": False,
+            "armed": False,
+            "mode": "UNKNOWN",
+            "system_status": 0,
+            "lat": None,
+            "lon": None,
+            "alt_m": None,
+            "local_ned": {"x": None, "y": None, "z": None},
+            "gps_fix": 0,
+            "satellites": 0,
+            "mission_current": None,
+            "last_heartbeat_time": 0.0,
+        }
+
+    match = payload.get("match")
+    if not isinstance(match, dict):
+        match = {
+            "timestamp_match": False,
+            "image_stamp_ns": 0,
+            "detection_stamp_ns": 0,
+            "abs_diff_ms": 0.0,
+            "tolerance_ms": 0.0,
+        }
+
+    disease_type, bbox = _extract_type_bbox_from_payload({**payload, "detection": detection})
+
+    lat = _safe_float(payload.get("lat"))
+    lon = _safe_float(payload.get("lon"))
+    if lat is None or lon is None:
+        lat = _safe_float(flight_state.get("lat"))
+        lon = _safe_float(flight_state.get("lon"))
+
+    normalized = dict(payload)
+    normalized["id"] = str(payload.get("id") or item_id)
+    normalized["image_file"] = str(payload.get("image_file") or (DATA_PATH / file_name))
+    normalized["detection"] = detection
+    normalized["flight_state"] = flight_state
+    normalized["match"] = match
+    normalized["type"] = _strip_type(payload.get("type"), disease_type)
+    normalized["bbox"] = payload.get("bbox") if isinstance(payload.get("bbox"), list) else bbox
+    normalized["lat"] = lat
+    normalized["lon"] = lon
+    return normalized
+
 def init_data():
     """初始化时加载所有 JSON 记录"""
     global records_store
-    raw_data = load_disease_records(DATA_PATH)
+    records_store = {}
+    try:
+        raw_data = load_disease_records(DATA_PATH)
+    except Exception as e:
+        print(f"init_data failed: {e}")
+        raw_data = []
+
     for item in raw_data:
-        # 使用图片文件名作为唯一 ID（例如：'img_001'）
-        file_id = os.path.basename(item['img_path']).split('.')[0]
-        records_store[file_id] = item
+        try:
+            file_id = os.path.basename(item["img_path"]).split(".")[0]
+            records_store[file_id] = item
+        except Exception:
+            continue
 
 @app.on_event("startup")
 async def startup_event():
@@ -170,6 +305,13 @@ async def get_records():
     """
     records = []
     for k, v in records_store.items():
+        lat = _safe_float(v.get("lat"))
+        lon = _safe_float(v.get("lon"))
+        if lat is None or lon is None:
+            continue
+        if not math.isfinite(lat) or not math.isfinite(lon):
+            continue
+
         # 计算 bbox 面积作为权重 (w * h)
         # 假设 bbox 格式为 [x, y, w, h]
         bbox_area = 1.0
@@ -185,9 +327,9 @@ async def get_records():
 
         records.append({
             "id": k, 
-            "lat": v["lat"], 
-            "lon": v["lon"], 
-            "type": v["type"],
+            "lat": lat,
+            "lon": lon,
+            "type": _strip_type(v.get("type"), "Unknown"),
             "area": bbox_area
         })
     return records
@@ -563,23 +705,29 @@ async def uav_upload_complete(upload_id: str, request: UploadCompleteRequest):
     DATA_PATH.mkdir(parents=True, exist_ok=True)
     tmp_path.replace(final_img_path)
 
+    normalized_payload = _normalize_uploaded_payload(
+        request.json_payload,
+        request.item_id,
+        request.file_name,
+    )
+
     with open(final_json_path, "w", encoding="utf-8") as f:
-        json.dump(request.json_payload, f, ensure_ascii=False, indent=2)
+        json.dump(normalized_payload, f, ensure_ascii=False, indent=2)
 
     # 同步更新内存记录，便于前端地图无需重启即可看到新数据
-    if isinstance(request.json_payload, dict):
-        lat = request.json_payload.get("lat")
-        lon = request.json_payload.get("lon")
-        if isinstance(lat, (int, float)) and isinstance(lon, (int, float)):
-            file_id = Path(request.file_name).stem
-            records_store[file_id] = {
-                "lat": float(lat),
-                "lon": float(lon),
-                "img_path": str(final_img_path),
-                "type": request.json_payload.get("type", "Unknown"),
-                "bbox": request.json_payload.get("bbox", []),
-                "count": 1,
-            }
+    lat = _safe_float(normalized_payload.get("lat"))
+    lon = _safe_float(normalized_payload.get("lon"))
+    file_id = Path(request.file_name).stem
+    records_store[file_id] = {
+        "lat": lat,
+        "lon": lon,
+        "img_path": str(final_img_path),
+        "type": _strip_type(normalized_payload.get("type"), "Unknown"),
+        "bbox": normalized_payload.get("bbox", []),
+        "count": 1,
+        "channel": normalized_payload.get("channel"),
+        "created_at": normalized_payload.get("created_at"),
+    }
 
     with upload_lock:
         upload_sessions.pop(upload_id, None)

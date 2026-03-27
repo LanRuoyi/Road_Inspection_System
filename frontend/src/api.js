@@ -1,7 +1,9 @@
 import axios from 'axios';
 
+const resolvedBaseUrl = (import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8001/api').replace(/\/$/, '');
+
 const apiClient = axios.create({
-  baseURL: 'http://localhost:8000/api',
+  baseURL: resolvedBaseUrl,
   timeout: 10000,
 });
 
@@ -38,7 +40,8 @@ export const startUAVPullTransfer = (deviceId, itemIds = []) => apiClient.post(`
 });
 
 export const buildROSWebSocketUrl = () => {
-  const base = apiClient.defaults.baseURL || 'http://localhost:8000/api';
+  const absoluteBase = apiClient.defaults.baseURL || resolvedBaseUrl;
+  const base = absoluteBase.startsWith('http') ? absoluteBase : `${window.location.origin}${absoluteBase}`;
   const wsBase = base.replace(/^http/i, 'ws');
   return `${wsBase}/ros/ws`;
 };

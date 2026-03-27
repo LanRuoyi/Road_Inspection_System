@@ -101,10 +101,21 @@ const selectedDevice = ref('')
 const remoteItems = ref([])
 const selectedRemoteIds = ref([])
 
+const toFiniteNumber = (v) => {
+  const n = Number(v)
+  return Number.isFinite(n) ? n : null
+}
+
 const formatLatLon = (metadata) => {
-  const lat = metadata?.lat
-  const lon = metadata?.lon
-  if (typeof lat === 'number' && typeof lon === 'number') {
+  let lat = toFiniteNumber(metadata?.lat)
+  let lon = toFiniteNumber(metadata?.lon)
+
+  if (lat === null || lon === null) {
+    lat = toFiniteNumber(metadata?.flight_state?.lat)
+    lon = toFiniteNumber(metadata?.flight_state?.lon)
+  }
+
+  if (lat !== null && lon !== null) {
     return `${lat.toFixed(6)}, ${lon.toFixed(6)}`
   }
   return '-'

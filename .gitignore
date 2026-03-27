@@ -28,4 +28,4 @@ dist-ssr
 *.txt
 !requirements.txt
 data
-
+__pycache__
