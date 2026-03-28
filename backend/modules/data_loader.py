@@ -25,52 +25,79 @@ def _strip_type(v: Any, default: str = "Unknown") -> str:
     return default
 
 
-def _extract_type_bbox(data: Dict[str, Any]) -> Tuple[str, List[float]]:
-    if isinstance(data.get("type"), str) and data.get("type").strip():
-        t = data.get("type").strip()
-    else:
-        t = "Unknown"
+def _normalize_bbox(x: Any, y: Any, w: Any, h: Any) -> Optional[List[float]]:
+    try:
+        xf = float(x)
+        yf = float(y)
+        wf = float(w)
+        hf = float(h)
+    except Exception:
+        return None
+    if wf <= 0 or hf <= 0:
+        return None
+    return [xf, yf, wf, hf]
 
-    bbox = data.get("bbox")
-    if isinstance(bbox, list) and len(bbox) >= 4:
-        try:
-            return t, [float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])]
-        except Exception:
-            pass
+
+def _extract_boxes(data: Dict[str, Any], fallback_type: str) -> List[Dict[str, Any]]:
+    boxes: List[Dict[str, Any]] = []
+    seen = set()
+
+    def add_box(box_type: str, bbox: Optional[List[float]]) -> None:
+        if not bbox:
+            return
+        t = _strip_type(box_type, fallback_type)
+        key = (t, round(bbox[0], 3), round(bbox[1], 3), round(bbox[2], 3), round(bbox[3], 3))
+        if key in seen:
+            return
+        seen.add(key)
+        boxes.append({"type": t, "bbox": bbox})
+
+    top_bbox = data.get("bbox")
+    if isinstance(top_bbox, list) and len(top_bbox) >= 4:
+        add_box(
+            _strip_type(data.get("type"), fallback_type),
+            _normalize_bbox(top_bbox[0], top_bbox[1], top_bbox[2], top_bbox[3]),
+        )
 
     detection = data.get("detection")
-    if not isinstance(detection, dict):
-        return t, []
+    if isinstance(detection, dict):
+        targets = detection.get("targets")
+        if isinstance(targets, list):
+            for target in targets:
+                if not isinstance(target, dict):
+                    continue
+                target_type = _strip_type(target.get("type"), fallback_type)
+                rois = target.get("rois")
+                if not isinstance(rois, list):
+                    continue
+                for roi in rois:
+                    if not isinstance(roi, dict):
+                        continue
+                    rect = roi.get("rect")
+                    if not isinstance(rect, dict):
+                        continue
+                    bbox = _normalize_bbox(
+                        rect.get("x_offset", 0) or 0,
+                        rect.get("y_offset", 0) or 0,
+                        rect.get("width", 0) or 0,
+                        rect.get("height", 0) or 0,
+                    )
+                    roi_type = _strip_type(roi.get("type"), target_type)
+                    add_box(roi_type, bbox)
 
-    targets = detection.get("targets")
-    if not isinstance(targets, list):
-        return t, []
+    return boxes
 
-    for target in targets:
-        if not isinstance(target, dict):
-            continue
-        target_type = _strip_type(target.get("type"), t)
-        rois = target.get("rois")
-        if not isinstance(rois, list):
-            continue
-        for roi in rois:
-            if not isinstance(roi, dict):
-                continue
-            rect = roi.get("rect")
-            if not isinstance(rect, dict):
-                continue
-            try:
-                x = float(rect.get("x_offset", 0) or 0)
-                y = float(rect.get("y_offset", 0) or 0)
-                w = float(rect.get("width", 0) or 0)
-                h = float(rect.get("height", 0) or 0)
-            except Exception:
-                continue
-            if w > 0 and h > 0:
-                roi_type = _strip_type(roi.get("type"), target_type)
-                return roi_type, [x, y, w, h]
 
-    return t, []
+def _pick_primary_type_bbox(boxes: List[Dict[str, Any]], fallback_type: str) -> Tuple[str, List[float]]:
+    if not boxes:
+        return fallback_type, []
+
+    # 选面积最大的目标作为主类型，兼容旧前端筛选与主图标展示。
+    primary = max(
+        boxes,
+        key=lambda item: float(item.get("bbox", [0, 0, 0, 0])[2]) * float(item.get("bbox", [0, 0, 0, 0])[3]),
+    )
+    return _strip_type(primary.get("type"), fallback_type), list(primary.get("bbox") or [])
 
 
 def _extract_lat_lon(data: Dict[str, Any]) -> Tuple[Optional[float], Optional[float]]:
@@ -110,7 +137,14 @@ def load_disease_records(directory):
                 if not isinstance(data, dict):
                     data = {}
 
-                disease_type, bbox = _extract_type_bbox(data)
+                fallback_type = _strip_type(data.get("type"), "Unknown")
+                boxes = _extract_boxes(data, fallback_type)
+                disease_type, bbox = _pick_primary_type_bbox(boxes, fallback_type)
+                type_list = sorted({
+                    _strip_type(item.get("type"), "Unknown")
+                    for item in boxes
+                    if isinstance(item, dict)
+                })
                 lat, lon = _extract_lat_lon(data)
                 if lat is not None and lon is not None:
                     lat, lon = coordinate_converter(lat, lon)
@@ -121,6 +155,9 @@ def load_disease_records(directory):
                     "img_path": str(img_path),
                     "type": disease_type,
                     "bbox": bbox,  # [x, y, w, h]
+                    "boxes": boxes,
+                    "types": type_list,
+                    "target_count": len(boxes),
                     "count": 1,  # 基础计数
                     "record_id": json_file.stem,
                     "created_at": data.get("created_at"),

@@ -91,6 +91,10 @@ let interactionState = null
 
 const MIN_WINDOW_WIDTH = 280
 const MIN_WINDOW_HEIGHT = 220
+const DEFAULT_WINDOW_WIDTH = 360
+const DEFAULT_WINDOW_HEIGHT = 300
+const WINDOW_GAP_X = 24
+const WINDOW_GAP_Y = 20
 
 const layeredTopics = computed(() => {
   return [...props.selectedTopics].sort((a, b) => {
@@ -115,12 +119,21 @@ const getCanvasSize = () => {
 
 const ensureWindowState = (topicName, index = 0) => {
   if (windowStates.value[topicName]) return
+
+  const { width: canvasWidth } = getCanvasSize()
+  const cols = Math.max(
+    1,
+    Math.floor((Math.max(canvasWidth - 40, DEFAULT_WINDOW_WIDTH) + WINDOW_GAP_X) / (DEFAULT_WINDOW_WIDTH + WINDOW_GAP_X))
+  )
+  const col = index % cols
+  const row = Math.floor(index / cols)
+
   zSeed += 1
   windowStates.value[topicName] = {
-    x: 20 + (index % 6) * 26,
-    y: 20 + Math.floor(index / 6) * 26,
-    width: 360,
-    height: 300,
+    x: 20 + col * (DEFAULT_WINDOW_WIDTH + WINDOW_GAP_X),
+    y: 20 + row * (DEFAULT_WINDOW_HEIGHT + WINDOW_GAP_Y),
+    width: DEFAULT_WINDOW_WIDTH,
+    height: DEFAULT_WINDOW_HEIGHT,
     z: zSeed
   }
 }

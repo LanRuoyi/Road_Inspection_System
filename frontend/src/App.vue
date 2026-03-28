@@ -35,12 +35,7 @@
       </el-aside>
       
       <!-- 右侧主内容区域 -->
-      <el-main 
-        class="main-container" 
-        :style="{ 
-          transform: isCollapsed ? 'translateX(' + getCollapsedWidth() + 'px)' : 'translateX(' + sidebarWidth + 'px)' 
-        }"
-      >
+      <el-main class="main-container">
         <!-- 病害分布功能 -->
         <div v-if="activeTab === 'disease-distribution'" class="content-area">
           <MapContainer 
@@ -351,13 +346,13 @@ onUnmounted(() => {
 .main-container {
   padding: 0;
   background-color: #f0f2f5;
-  transition: transform 0.3s ease-in-out;
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 100%;
+  transition: all 0.3s ease-in-out;
+  position: relative;
+  flex: 1;
+  min-width: 0;
   height: 100%;
   margin: 0 !important;
+  overflow: hidden;
 }
 
 .content-area {

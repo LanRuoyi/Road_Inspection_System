@@ -14,6 +14,14 @@
           <span class="value">{{ safeType }}</span>
         </div>
         <div class="info-item">
+          <span class="label">类别集合：</span>
+          <span class="value">{{ safeTypesText }}</span>
+        </div>
+        <div class="info-item">
+          <span class="label">目标数量：</span>
+          <span class="value">{{ safeTargetCount }}</span>
+        </div>
+        <div class="info-item">
           <span class="label">位置：</span>
           <span class="value">{{ safeLatLon }}</span>
         </div>
@@ -66,6 +74,24 @@ const safeId = computed(() => {
   return v == null ? '-' : String(v)
 })
 
+const safeTypesText = computed(() => {
+  const typeList = Array.isArray(props.data?.types)
+    ? props.data.types.filter((item) => typeof item === 'string' && item.trim())
+    : []
+  if (typeList.length > 0) {
+    return typeList.join(' / ')
+  }
+  return safeType.value
+})
+
+const safeTargetCount = computed(() => {
+  const n = Number(props.data?.target_count)
+  if (Number.isFinite(n) && n >= 0) {
+    return String(Math.floor(n))
+  }
+  return '0'
+})
+
 const safeLatLon = computed(() => {
   const lat = Number(props.data?.lat)
   const lon = Number(props.data?.lon)
@@ -93,7 +119,7 @@ const windowStyle = computed(() => {
   const windowHeight = `calc(90%)` // 可用空间的90%
   
   // 计算水平居中位置：left = (可用空间宽度 - 窗口宽度) / 2
-  const left = `calc((${availableSpaceWidth} - ${windowWidth}) / 2)`
+  const left = `calc(${props.sidebarWidth}px + ((${availableSpaceWidth} - ${windowWidth}) / 2))`
   
   return {
     left: left,
@@ -160,7 +186,7 @@ watch(() => props.data, (newData) => {
 
 /* 病害信息区域 (固定比例40%) */
 .info-section {
-  flex: 0 0 0; /* 固定40%高度 */
+  flex: 0 0 auto;
   display: flex;
   flex-direction: column;
   justify-content: center;

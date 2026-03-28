@@ -137,7 +137,7 @@
             :disabled="!rosConnected"
           >
             <el-option
-              v-for="topic in rosTopics"
+              v-for="topic in visibleRosTopics"
               :key="topic.name"
               :label="`${topic.name} (${topic.type})`"
               :value="topic.name"
@@ -181,7 +181,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, watch, onUnmounted } from 'vue'
+import { computed, ref, onMounted, watch, onUnmounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import {
   MapLocation,
@@ -235,6 +235,21 @@ const rosTopicTypes = ref([])
 const rosTopics = ref([])
 const selectedTopicType = ref('')
 const selectedTopicNames = ref([])
+let sidebarResizeObserver = null
+
+const visibleRosTopics = computed(() => {
+  const allTopics = Array.isArray(rosTopics.value) ? rosTopics.value : []
+  if (!selectedTopicType.value) {
+    return allTopics
+  }
+
+  const selectedNameSet = new Set(selectedTopicNames.value)
+  return allTopics.filter((topic) => {
+    if (!topic || !topic.name) return false
+    if (selectedNameSet.has(topic.name)) return true
+    return topic.type === selectedTopicType.value
+  })
+})
 
 // 监听地图类型变化
 watch(mapType, (newType) => {
@@ -270,21 +285,17 @@ const fetchROSTopicCatalog = async () => {
   if (!rosConnected.value) {
     rosTopicTypes.value = []
     rosTopics.value = []
-    selectedTopicNames.value = []
     return
   }
 
   try {
     const [typesResp, topicsResp] = await Promise.all([
       fetchROSTopicTypes(),
-      fetchROSTopics(selectedTopicType.value)
+      fetchROSTopics()
     ])
 
     rosTopicTypes.value = typesResp.data.topic_types || []
     rosTopics.value = topicsResp.data.topics || []
-
-    const validNames = new Set(rosTopics.value.map(item => item.name))
-    selectedTopicNames.value = selectedTopicNames.value.filter(name => validNames.has(name))
   } catch (error) {
     console.error('获取 ROS 话题目录失败:', error)
     ElMessage.error('获取 ROS 话题目录失败')
@@ -374,18 +385,17 @@ const updateSidebarWidth = () => {
 
 onMounted(() => {
   updateSidebarWidth();
-  const resizeObserver = new ResizeObserver(updateSidebarWidth);
+  sidebarResizeObserver = new ResizeObserver(updateSidebarWidth);
   const sidebarElement = document.querySelector('.sidebar');
   if (sidebarElement) {
-    resizeObserver.observe(sidebarElement);
+    sidebarResizeObserver.observe(sidebarElement);
   }
 });
 
 onUnmounted(() => {
-  const sidebarElement = document.querySelector('.sidebar');
-  if (sidebarElement) {
-    const resizeObserver = new ResizeObserver(updateSidebarWidth);
-    resizeObserver.unobserve(sidebarElement);
+  if (sidebarResizeObserver) {
+    sidebarResizeObserver.disconnect();
+    sidebarResizeObserver = null;
   }
 });
 </script>

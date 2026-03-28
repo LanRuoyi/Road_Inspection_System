@@ -118,6 +118,11 @@ let markerClusterGroup = null
 const floatingWindowVisible = ref(false)
 const selectedDisease = ref(null)
 
+const toFiniteNumber = (v) => {
+  const n = Number(v)
+  return Number.isFinite(n) ? n : null
+}
+
 // 监听病害类型变化，重新筛选标记点
 watch(() => props.diseaseType, (newType) => {
   console.log('病害类型变化:', newType)
@@ -277,7 +282,12 @@ const filterMarkersByType = (type) => {
     // 只显示指定类型的标记点
     filteredMarkers.value = markers.value.filter(marker => {
       const record = marker.options.record;
-      return record && record.type === type;
+      if (!record) return false;
+      const types = Array.isArray(record.types) ? record.types.filter(Boolean) : [];
+      if (types.length > 0) {
+        return types.includes(type);
+      }
+      return record.type === type;
     });
   }
   
@@ -453,9 +463,14 @@ const addMarkersToMap = () => {
   
   diseaseRecords.value.forEach(record => {
     try {
-      if (!Number.isFinite(record.lat) || !Number.isFinite(record.lon)) {
+      const lat = toFiniteNumber(record.lat)
+      const lon = toFiniteNumber(record.lon)
+      if (lat === null || lon === null) {
         return;
       }
+
+      record.lat = lat
+      record.lon = lon
 
       // 创建标记点（使用缩略图样式）
       const marker = L.marker([record.lat, record.lon], {
@@ -646,25 +661,28 @@ const getDiseaseTypeTag = (type) => {
   return typeMap[type] || 'info'
 }
 
-// 监听侧边栏折叠状态变化
-watch(() => props.sidebarCollapsed, async () => {
-  // 等待DOM更新完成
-  await nextTick()
-  
-  // 延迟执行，确保容器尺寸已经更新
-  setTimeout(() => {
-    if (map) {
-      // 不再调用invalidateSize()，避免地图中心点重置
-      // 地图容器已经扩展到最大宽度，通过CSS平移实现动画效果
-      // 这样地图中心点会自然保持，不会强制恢复
-      
-      // 更新坐标显示为当前实际中心点
-      const center = map.getCenter()
-      currentLat.value = center.lat
-      currentLng.value = center.lng
-    }
-  }, 300) // 等待侧边栏动画完成
-})
+const refreshMapViewport = () => {
+  if (!map) return
+  const center = map.getCenter()
+  const zoom = map.getZoom()
+  map.invalidateSize({ pan: false, animate: false })
+  map.setView(center, zoom, { animate: false })
+  currentLat.value = center.lat
+  currentLng.value = center.lng
+}
+
+watch(
+  () => [props.sidebarCollapsed, props.sidebarWidth],
+  async () => {
+    await nextTick()
+    setTimeout(() => {
+      refreshMapViewport()
+    }, 60)
+    setTimeout(() => {
+      refreshMapViewport()
+    }, 320)
+  }
+)
 
 // 监听地图类型变化
 watch(() => props.mapType, (newType) => {

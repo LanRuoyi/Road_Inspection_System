@@ -1,8 +1,8 @@
 <template>
   <div class="transfer-page">
-    <el-row :gutter="16">
-      <el-col :span="12">
-        <el-card>
+    <el-row :gutter="16" class="transfer-row">
+      <el-col :span="12" class="transfer-col">
+        <el-card class="pane-card">
           <template #header>
             <div class="card-header">
               <span>本地已接收数据</span>
@@ -10,11 +10,11 @@
             </div>
           </template>
 
-          <el-table :data="localRecords" height="460" size="small">
+          <el-table :data="localRecords" height="100%" size="small" class="pane-table">
             <el-table-column prop="item_id" label="ID" min-width="160" />
             <el-table-column label="类型" min-width="100">
               <template #default="scope">
-                {{ scope.row.metadata?.type || '-' }}
+                {{ formatTypes(scope.row.metadata) }}
               </template>
             </el-table-column>
             <el-table-column label="经纬度" min-width="160">
@@ -33,8 +33,8 @@
         </el-card>
       </el-col>
 
-      <el-col :span="12">
-        <el-card>
+      <el-col :span="12" class="transfer-col">
+        <el-card class="pane-card">
           <template #header>
             <div class="card-header">
               <span>无人机文件清单</span>
@@ -49,8 +49,9 @@
 
           <el-table
             :data="remoteItems"
-            height="410"
+            height="100%"
             size="small"
+            class="pane-table"
             @selection-change="onSelectionChange"
           >
             <el-table-column type="selection" width="40" />
@@ -121,6 +122,22 @@ const formatLatLon = (metadata) => {
   return '-'
 }
 
+const formatTypes = (metadata) => {
+  const typeList = Array.isArray(metadata?.types)
+    ? metadata.types.filter((item) => typeof item === 'string' && item.trim())
+    : []
+  if (typeList.length > 0) {
+    return typeList.join(' / ')
+  }
+
+  const t = metadata?.type
+  if (typeof t === 'string' && t.trim()) {
+    return t.trim()
+  }
+
+  return '-'
+}
+
 const refreshLocal = async () => {
   try {
     const resp = await fetchLocalUAVRecords()
@@ -188,6 +205,31 @@ onMounted(async () => {
 <style scoped>
 .transfer-page {
   padding: 16px;
+  height: 100%;
+  overflow: hidden;
+}
+
+.transfer-row {
+  height: 100%;
+}
+
+.transfer-col {
+  height: 100%;
+  min-width: 0;
+}
+
+:deep(.transfer-col .el-card) {
+  height: 100%;
+}
+
+:deep(.pane-card .el-card__body) {
+  height: calc(100% - 56px);
+  display: flex;
+  flex-direction: column;
+}
+
+.pane-table {
+  flex: 1;
 }
 
 .card-header {

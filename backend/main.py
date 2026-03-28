@@ -40,6 +40,8 @@ class DiseaseRecord(BaseModel):
     lon: float
     type: str
     area: float = 1.0  # 新增：BBox 面积或权重，用于热力图
+    types: List[str] = []
+    target_count: int = 0
 
 class MapType(BaseModel):
     value: str
@@ -134,49 +136,85 @@ def _strip_type(v: Any, default: str = "Unknown") -> str:
     return default
 
 
-def _extract_type_bbox_from_payload(payload: Dict[str, Any]) -> tuple[str, List[float]]:
-    disease_type = _strip_type(payload.get("type"), "Unknown")
+def _normalize_bbox(x: Any, y: Any, w: Any, h: Any) -> Optional[List[float]]:
+    try:
+        xf = float(x)
+        yf = float(y)
+        wf = float(w)
+        hf = float(h)
+    except Exception:
+        return None
+    if wf <= 0 or hf <= 0:
+        return None
+    return [xf, yf, wf, hf]
 
-    bbox = payload.get("bbox")
-    if isinstance(bbox, list) and len(bbox) >= 4:
-        try:
-            return disease_type, [float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])]
-        except Exception:
-            pass
+
+def _extract_boxes_from_payload(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    fallback_type = _strip_type(payload.get("type"), "Unknown")
+    boxes: List[Dict[str, Any]] = []
+    seen = set()
+
+    def add_box(box_type: str, bbox: Optional[List[float]]) -> None:
+        if not bbox:
+            return
+        t = _strip_type(box_type, fallback_type)
+        key = (t, round(bbox[0], 3), round(bbox[1], 3), round(bbox[2], 3), round(bbox[3], 3))
+        if key in seen:
+            return
+        seen.add(key)
+        boxes.append({"type": t, "bbox": bbox})
+
+    top_bbox = payload.get("bbox")
+    if isinstance(top_bbox, list) and len(top_bbox) >= 4:
+        add_box(
+            _strip_type(payload.get("type"), fallback_type),
+            _normalize_bbox(top_bbox[0], top_bbox[1], top_bbox[2], top_bbox[3]),
+        )
 
     detection = payload.get("detection")
-    if not isinstance(detection, dict):
-        return disease_type, []
+    if isinstance(detection, dict):
+        targets = detection.get("targets")
+        if isinstance(targets, list):
+            for target in targets:
+                if not isinstance(target, dict):
+                    continue
+                target_type = _strip_type(target.get("type"), fallback_type)
+                rois = target.get("rois")
+                if not isinstance(rois, list):
+                    continue
+                for roi in rois:
+                    if not isinstance(roi, dict):
+                        continue
+                    rect = roi.get("rect")
+                    if not isinstance(rect, dict):
+                        continue
+                    add_box(
+                        _strip_type(roi.get("type"), target_type),
+                        _normalize_bbox(
+                            rect.get("x_offset", 0) or 0,
+                            rect.get("y_offset", 0) or 0,
+                            rect.get("width", 0) or 0,
+                            rect.get("height", 0) or 0,
+                        ),
+                    )
 
-    targets = detection.get("targets")
-    if not isinstance(targets, list):
-        return disease_type, []
+    return boxes
 
-    for target in targets:
-        if not isinstance(target, dict):
-            continue
-        target_type = _strip_type(target.get("type"), disease_type)
-        rois = target.get("rois")
-        if not isinstance(rois, list):
-            continue
-        for roi in rois:
-            if not isinstance(roi, dict):
-                continue
-            rect = roi.get("rect")
-            if not isinstance(rect, dict):
-                continue
-            try:
-                x = float(rect.get("x_offset", 0) or 0)
-                y = float(rect.get("y_offset", 0) or 0)
-                w = float(rect.get("width", 0) or 0)
-                h = float(rect.get("height", 0) or 0)
-            except Exception:
-                continue
-            if w > 0 and h > 0:
-                roi_type = _strip_type(roi.get("type"), target_type)
-                return roi_type, [x, y, w, h]
 
-    return disease_type, []
+def _pick_primary_type_bbox(boxes: List[Dict[str, Any]], fallback_type: str) -> tuple[str, List[float]]:
+    if not boxes:
+        return _strip_type(fallback_type, "Unknown"), []
+
+    primary = max(
+        boxes,
+        key=lambda item: float(item.get("bbox", [0, 0, 0, 0])[2]) * float(item.get("bbox", [0, 0, 0, 0])[3]),
+    )
+    return _strip_type(primary.get("type"), fallback_type), list(primary.get("bbox") or [])
+
+
+def _extract_type_bbox_from_payload(payload: Dict[str, Any]) -> tuple[str, List[float]]:
+    boxes = _extract_boxes_from_payload(payload)
+    return _pick_primary_type_bbox(boxes, _strip_type(payload.get("type"), "Unknown"))
 
 
 def _normalize_uploaded_payload(payload: Any, item_id: str, file_name: str) -> Dict[str, Any]:
@@ -220,7 +258,13 @@ def _normalize_uploaded_payload(payload: Any, item_id: str, file_name: str) -> D
             "tolerance_ms": 0.0,
         }
 
-    disease_type, bbox = _extract_type_bbox_from_payload({**payload, "detection": detection})
+    boxes = _extract_boxes_from_payload({**payload, "detection": detection})
+    disease_type, bbox = _pick_primary_type_bbox(boxes, _strip_type(payload.get("type"), "Unknown"))
+    type_list = sorted({
+        _strip_type(item.get("type"), "Unknown")
+        for item in boxes
+        if isinstance(item, dict)
+    })
 
     lat = _safe_float(payload.get("lat"))
     lon = _safe_float(payload.get("lon"))
@@ -236,6 +280,9 @@ def _normalize_uploaded_payload(payload: Any, item_id: str, file_name: str) -> D
     normalized["match"] = match
     normalized["type"] = _strip_type(payload.get("type"), disease_type)
     normalized["bbox"] = payload.get("bbox") if isinstance(payload.get("bbox"), list) else bbox
+    normalized["boxes"] = boxes
+    normalized["types"] = type_list
+    normalized["target_count"] = len(boxes)
     normalized["lat"] = lat
     normalized["lon"] = lon
     return normalized
@@ -295,6 +342,50 @@ def _get_topic_catalog(topic_type: Optional[str] = None) -> Dict[str, Any]:
         "topics": items,
     }
 
+
+def _build_disease_types() -> List[Dict[str, str]]:
+    base = []
+    seen = set()
+
+    for item in DISEASE_TYPES:
+        if not isinstance(item, dict):
+            continue
+        value = _strip_type(item.get("value"), "")
+        if not value or value in seen:
+            continue
+        base.append({
+            "value": value,
+            "label": _strip_type(item.get("label"), value),
+        })
+        seen.add(value)
+
+    dynamic_types = set()
+    for item in records_store.values():
+        if not isinstance(item, dict):
+            continue
+
+        primary_type = _strip_type(item.get("type"), "")
+        if primary_type and primary_type != "all":
+            dynamic_types.add(primary_type)
+
+        types = item.get("types")
+        if isinstance(types, list):
+            for t in types:
+                value = _strip_type(t, "")
+                if value and value != "all":
+                    dynamic_types.add(value)
+
+    for t in sorted(dynamic_types):
+        if t in seen:
+            continue
+        base.append({"value": t, "label": t})
+        seen.add(t)
+
+    if "all" not in seen:
+        base.insert(0, {"value": "all", "label": "全部"})
+
+    return base
+
 # --- API 接口 ---
 
 @app.get("/api/records", response_model=List[DiseaseRecord])
@@ -312,25 +403,43 @@ async def get_records():
         if not math.isfinite(lat) or not math.isfinite(lon):
             continue
 
-        # 计算 bbox 面积作为权重 (w * h)
-        # 假设 bbox 格式为 [x, y, w, h]
-        bbox_area = 1.0
-        if "bbox" in v and isinstance(v["bbox"], list) and len(v["bbox"]) >= 4:
+        boxes = v.get("boxes") if isinstance(v.get("boxes"), list) else []
+        if not boxes and isinstance(v.get("bbox"), list):
+            boxes = [{"type": _strip_type(v.get("type"), "Unknown"), "bbox": v.get("bbox", [])}]
+
+        type_list = sorted({
+            _strip_type(item.get("type"), "Unknown")
+            for item in boxes
+            if isinstance(item, dict)
+        })
+        target_count = len(boxes)
+
+        # 多目标场景下使用全部框面积和作为热力图权重。
+        raw_area = 0.0
+        for item in boxes:
+            if not isinstance(item, dict):
+                continue
+            bbox = item.get("bbox")
+            if not isinstance(bbox, list) or len(bbox) < 4:
+                continue
             try:
-                # 简单计算面积：宽 * 高
-                # 根据实际像素值可能很大，建议做归一化或缩放，防止热力图权重过大
-                raw_area = float(v["bbox"][2]) * float(v["bbox"][3])
-                # 这里缩小比例，例如除以 1000，基础权重至少为 1.0
-                bbox_area = max(1.0, raw_area / 1000.0)
+                raw_area += max(0.0, float(bbox[2])) * max(0.0, float(bbox[3]))
             except (ValueError, TypeError):
-                bbox_area = 1.0
+                continue
+        bbox_area = max(1.0, raw_area / 1000.0)
+
+        disease_type = _strip_type(v.get("type"), "Unknown")
+        if disease_type == "Unknown" and type_list:
+            disease_type = type_list[0]
 
         records.append({
             "id": k, 
             "lat": lat,
             "lon": lon,
-            "type": _strip_type(v.get("type"), "Unknown"),
-            "area": bbox_area
+            "type": disease_type,
+            "area": bbox_area,
+            "types": type_list,
+            "target_count": target_count,
         })
     return records
 
@@ -344,8 +453,13 @@ async def get_image(record_id: str):
     
     record = records_store[record_id]
     
-    # 绘制 BBox
-    img = draw_bbox_on_image(record['img_path'], record['bbox'], record['type'])
+    # 绘制多目标 BBox（按类别区分颜色）
+    img = draw_bbox_on_image(
+        record['img_path'],
+        record.get('bbox', []),
+        record.get('type', 'Unknown'),
+        boxes=record.get('boxes', []),
+    )
     
     if img is None:
         raise HTTPException(status_code=500, detail="Image processing failed")
@@ -370,7 +484,7 @@ async def get_disease_types():
     """
     接口 4: 获取病害类型配置
     """
-    return DISEASE_TYPES
+    return _build_disease_types()
 
 
 @app.post("/api/ros/connect")
@@ -724,6 +838,9 @@ async def uav_upload_complete(upload_id: str, request: UploadCompleteRequest):
         "img_path": str(final_img_path),
         "type": _strip_type(normalized_payload.get("type"), "Unknown"),
         "bbox": normalized_payload.get("bbox", []),
+        "boxes": normalized_payload.get("boxes", []),
+        "types": normalized_payload.get("types", []),
+        "target_count": int(normalized_payload.get("target_count") or 0),
         "count": 1,
         "channel": normalized_payload.get("channel"),
         "created_at": normalized_payload.get("created_at"),
