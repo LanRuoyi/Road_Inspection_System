@@ -16,10 +16,17 @@ class MAVLinkBridgeNode(Node):
     def __init__(self):
         super().__init__("mavlink_bridge_node")
 
-        self.serial_port = self.declare_parameter("serial_port", "/dev/ttyS3").value
+        self.serial_port = self.declare_parameter("serial_port", "/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0").value
         self.baudrate = int(self.declare_parameter("baudrate", 57600).value)
         self.source_system = int(self.declare_parameter("source_system", 245).value)
+        self.source_component = int(
+            self.declare_parameter(
+                "source_component",
+                int(getattr(mavutil.mavlink, "MAV_COMP_ID_MISSIONPLANNER", 190)),
+            ).value
+        )
         self.heartbeat_timeout_s = float(self.declare_parameter("heartbeat_timeout_s", 5.0).value)
+        self.stream_rate_hz = int(self.declare_parameter("stream_rate_hz", 10).value)
 
         self.state_pub = self.create_publisher(String, "/uav/mavlink/state", 10)
         self.pose_pub = self.create_publisher(PoseStamped, "/uav/mavlink/local_pose", 20)
@@ -27,6 +34,9 @@ class MAVLinkBridgeNode(Node):
 
         self.master = None
         self.master_lock = threading.Lock()
+        self._stream_requested = False
+        self._last_gcs_heartbeat_time = 0.0
+        self._last_stream_request_time = 0.0
 
         self.state: Dict[str, Any] = {
             "connected": False,
@@ -47,6 +57,8 @@ class MAVLinkBridgeNode(Node):
 
         self.create_timer(0.02, self.read_timer_callback)
         self.create_timer(1.0, self.publish_state_timer_callback)
+        self.create_timer(1.0, self.gcs_heartbeat_timer_callback)
+        self.create_timer(5.0, self.request_stream_timer_callback)
         self.create_timer(2.0, self.health_timer_callback)
 
     def _connect(self):
@@ -56,14 +68,22 @@ class MAVLinkBridgeNode(Node):
                 self.serial_port,
                 baud=self.baudrate,
                 source_system=self.source_system,
+                source_component=self.source_component,
                 autoreconnect=True,
             )
-            master.wait_heartbeat(timeout=self.heartbeat_timeout_s)
+            hb = master.wait_heartbeat(timeout=self.heartbeat_timeout_s)
             with self.master_lock:
                 self.master = master
             self.state["connected"] = True
             self.state["last_heartbeat_time"] = time.time()
-            self.get_logger().info("MAVLink connected")
+            self.get_logger().info(
+                "MAVLink connected: "
+                f"target={master.target_system}:{master.target_component}, "
+                f"heartbeat from {hb.get_srcSystem()}:{hb.get_srcComponent()}"
+            )
+            self._stream_requested = False
+            self._send_gcs_heartbeat(master)
+            self._request_data_streams(master)
         except Exception as e:
             self.state["connected"] = False
             self.get_logger().error(f"MAVLink connect failed: {e}")
@@ -77,6 +97,64 @@ class MAVLinkBridgeNode(Node):
                     pass
                 self.master = None
         self.state["connected"] = False
+        self._stream_requested = False
+
+    def _send_gcs_heartbeat(self, master):
+        # 飞控通常在看到 GCS 心跳后才稳定下发完整遥测流。
+        try:
+            master.mav.heartbeat_send(
+                mavutil.mavlink.MAV_TYPE_GCS,
+                mavutil.mavlink.MAV_AUTOPILOT_INVALID,
+                0,
+                0,
+                mavutil.mavlink.MAV_STATE_ACTIVE,
+            )
+            self._last_gcs_heartbeat_time = time.time()
+        except Exception as e:
+            self.get_logger().warning(f"Send GCS heartbeat failed: {e}")
+
+    def _request_data_streams(self, master):
+        # 对 ArduPilot 主动请求数据流，行为接近 mavproxy。
+        try:
+            stream_rate = max(1, int(self.stream_rate_hz))
+            stream_ids = [
+                mavutil.mavlink.MAV_DATA_STREAM_RAW_SENSORS,
+                mavutil.mavlink.MAV_DATA_STREAM_EXTENDED_STATUS,
+                mavutil.mavlink.MAV_DATA_STREAM_RC_CHANNELS,
+                mavutil.mavlink.MAV_DATA_STREAM_POSITION,
+                mavutil.mavlink.MAV_DATA_STREAM_EXTRA1,
+                mavutil.mavlink.MAV_DATA_STREAM_EXTRA2,
+                mavutil.mavlink.MAV_DATA_STREAM_EXTRA3,
+            ]
+            for stream_id in stream_ids:
+                master.mav.request_data_stream_send(
+                    master.target_system,
+                    master.target_component,
+                    stream_id,
+                    stream_rate,
+                    1,
+                )
+            self._stream_requested = True
+            self._last_stream_request_time = time.time()
+            self.get_logger().info(f"Requested MAVLink data streams at {stream_rate} Hz")
+        except Exception as e:
+            self.get_logger().warning(f"Request data streams failed: {e}")
+
+    def gcs_heartbeat_timer_callback(self):
+        with self.master_lock:
+            master = self.master
+        if master is None:
+            return
+        self._send_gcs_heartbeat(master)
+
+    def request_stream_timer_callback(self):
+        with self.master_lock:
+            master = self.master
+        if master is None:
+            return
+        # 周期性重请求，防止飞控重启或链路抖动后流配置丢失。
+        if (not self._stream_requested) or (time.time() - self._last_stream_request_time > 15.0):
+            self._request_data_streams(master)
 
     def health_timer_callback(self):
         now = time.time()
@@ -116,6 +194,9 @@ class MAVLinkBridgeNode(Node):
     def _handle_message(self, m):
         msg_type = m.get_type()
 
+        if msg_type == "BAD_DATA":
+            return
+
         if msg_type == "HEARTBEAT":
             self.state["last_heartbeat_time"] = time.time()
             self.state["armed"] = bool(m.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
@@ -137,6 +218,11 @@ class MAVLinkBridgeNode(Node):
 
         elif msg_type == "MISSION_CURRENT":
             self.state["mission_current"] = int(m.seq)
+
+        elif msg_type == "STATUSTEXT":
+            text = str(getattr(m, "text", "")).strip()
+            if text:
+                self.get_logger().info(f"FCU: {text}")
 
         elif msg_type == "LOCAL_POSITION_NED":
             x = float(m.x)

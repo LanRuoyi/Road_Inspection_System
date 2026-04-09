@@ -236,6 +236,18 @@ const rosTopics = ref([])
 const selectedTopicType = ref('')
 const selectedTopicNames = ref([])
 let sidebarResizeObserver = null
+const UNKNOWN_TYPE_SET = new Set(['unknown', 'unknow', 'none', 'null', 'n/a', 'na', '-', '--'])
+
+const isValidDiseaseType = (value) => {
+  if (typeof value !== 'string') {
+    return false
+  }
+  const cleaned = value.trim()
+  if (!cleaned) {
+    return false
+  }
+  return !UNKNOWN_TYPE_SET.has(cleaned.toLowerCase())
+}
 
 const visibleRosTopics = computed(() => {
   const allTopics = Array.isArray(rosTopics.value) ? rosTopics.value : []
@@ -278,7 +290,12 @@ const fetchMapAndDiseaseTypes = async () => {
   ])
 
   mapTypes.value = Array.isArray(mapResponse.data) ? mapResponse.data : []
-  diseaseTypes.value = Array.isArray(diseaseResponse.data) ? diseaseResponse.data : []
+  diseaseTypes.value = (Array.isArray(diseaseResponse.data) ? diseaseResponse.data : [])
+    .filter((item) => item && isValidDiseaseType(item.value))
+
+  if (!diseaseTypes.value.some((item) => item.value === diseaseType.value)) {
+    diseaseType.value = 'all'
+  }
 }
 
 const fetchROSTopicCatalog = async () => {
@@ -406,6 +423,7 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   background-color: #fff;
+  overflow-x: hidden;
 }
 
 .sidebar-header {
@@ -507,6 +525,7 @@ onUnmounted(() => {
   flex: 1;
   padding: 20px;
   overflow-y: auto;
+  overflow-x: hidden;
 }
 
 .function-content h4 {

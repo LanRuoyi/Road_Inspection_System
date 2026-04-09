@@ -25,6 +25,18 @@ def _strip_type(v: Any, default: str = "Unknown") -> str:
     return default
 
 
+_UNKNOWN_TYPE_VALUES = {"unknown", "unknow", "none", "null", "n/a", "na", "-", "--"}
+
+
+def _normalize_disease_type(v: Any) -> str:
+    s = _strip_type(v, "")
+    if not s:
+        return ""
+    if s.lower() in _UNKNOWN_TYPE_VALUES:
+        return ""
+    return s
+
+
 def _normalize_bbox(x: Any, y: Any, w: Any, h: Any) -> Optional[List[float]]:
     try:
         xf = float(x)
@@ -45,7 +57,7 @@ def _extract_boxes(data: Dict[str, Any], fallback_type: str) -> List[Dict[str, A
     def add_box(box_type: str, bbox: Optional[List[float]]) -> None:
         if not bbox:
             return
-        t = _strip_type(box_type, fallback_type)
+        t = _normalize_disease_type(box_type) or fallback_type
         key = (t, round(bbox[0], 3), round(bbox[1], 3), round(bbox[2], 3), round(bbox[3], 3))
         if key in seen:
             return
@@ -55,7 +67,7 @@ def _extract_boxes(data: Dict[str, Any], fallback_type: str) -> List[Dict[str, A
     top_bbox = data.get("bbox")
     if isinstance(top_bbox, list) and len(top_bbox) >= 4:
         add_box(
-            _strip_type(data.get("type"), fallback_type),
+            _normalize_disease_type(data.get("type")) or fallback_type,
             _normalize_bbox(top_bbox[0], top_bbox[1], top_bbox[2], top_bbox[3]),
         )
 
@@ -66,7 +78,7 @@ def _extract_boxes(data: Dict[str, Any], fallback_type: str) -> List[Dict[str, A
             for target in targets:
                 if not isinstance(target, dict):
                     continue
-                target_type = _strip_type(target.get("type"), fallback_type)
+                target_type = _normalize_disease_type(target.get("type")) or fallback_type
                 rois = target.get("rois")
                 if not isinstance(rois, list):
                     continue
@@ -82,7 +94,7 @@ def _extract_boxes(data: Dict[str, Any], fallback_type: str) -> List[Dict[str, A
                         rect.get("width", 0) or 0,
                         rect.get("height", 0) or 0,
                     )
-                    roi_type = _strip_type(roi.get("type"), target_type)
+                    roi_type = _normalize_disease_type(roi.get("type")) or target_type
                     add_box(roi_type, bbox)
 
     return boxes
@@ -97,7 +109,7 @@ def _pick_primary_type_bbox(boxes: List[Dict[str, Any]], fallback_type: str) -> 
         boxes,
         key=lambda item: float(item.get("bbox", [0, 0, 0, 0])[2]) * float(item.get("bbox", [0, 0, 0, 0])[3]),
     )
-    return _strip_type(primary.get("type"), fallback_type), list(primary.get("bbox") or [])
+    return _normalize_disease_type(primary.get("type")) or fallback_type, list(primary.get("bbox") or [])
 
 
 def _extract_lat_lon(data: Dict[str, Any]) -> Tuple[Optional[float], Optional[float]]:
@@ -137,14 +149,19 @@ def load_disease_records(directory):
                 if not isinstance(data, dict):
                     data = {}
 
-                fallback_type = _strip_type(data.get("type"), "Unknown")
+                fallback_type = _normalize_disease_type(data.get("type"))
                 boxes = _extract_boxes(data, fallback_type)
                 disease_type, bbox = _pick_primary_type_bbox(boxes, fallback_type)
-                type_list = sorted({
-                    _strip_type(item.get("type"), "Unknown")
-                    for item in boxes
-                    if isinstance(item, dict)
-                })
+                type_set = set()
+                for item in boxes:
+                    if not isinstance(item, dict):
+                        continue
+                    t = _normalize_disease_type(item.get("type"))
+                    if t:
+                        type_set.add(t)
+                type_list = sorted(type_set)
+                if not disease_type and type_list:
+                    disease_type = type_list[0]
                 lat, lon = _extract_lat_lon(data)
                 if lat is not None and lon is not None:
                     lat, lon = coordinate_converter(lat, lon)

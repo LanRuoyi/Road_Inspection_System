@@ -10,19 +10,19 @@
             </div>
           </template>
 
-          <el-table :data="localRecords" height="100%" size="small" class="pane-table">
-            <el-table-column prop="item_id" label="ID" min-width="160" />
-            <el-table-column label="类型" min-width="100">
+          <el-table :data="localRecords" height="100%" size="small" class="pane-table" border>
+            <el-table-column prop="item_id" label="ID" min-width="160" :resizable="true" />
+            <el-table-column label="类型" min-width="100" :resizable="true">
               <template #default="scope">
                 {{ formatTypes(scope.row.metadata) }}
               </template>
             </el-table-column>
-            <el-table-column label="经纬度" min-width="160">
+            <el-table-column label="经纬度" min-width="160" :resizable="true">
               <template #default="scope">
                 <span>{{ formatLatLon(scope.row.metadata) }}</span>
               </template>
             </el-table-column>
-            <el-table-column label="图片" width="70">
+            <el-table-column label="图片" width="70" :resizable="true">
               <template #default="scope">
                 <el-tag size="small" :type="scope.row.has_image ? 'success' : 'warning'">
                   {{ scope.row.has_image ? '有' : '无' }}
@@ -42,7 +42,7 @@
                 <el-select v-model="selectedDevice" placeholder="选择设备" size="small" style="width: 160px;">
                   <el-option v-for="d in devices" :key="d" :label="d" :value="d" />
                 </el-select>
-                <el-button size="small" :disabled="!selectedDevice || !rosConnected" @click="refreshManifest">同步清单</el-button>
+                <el-button size="small" :disabled="!selectedDevice" @click="refreshManifest">同步清单</el-button>
               </div>
             </div>
           </template>
@@ -52,12 +52,13 @@
             height="100%"
             size="small"
             class="pane-table"
+            border
             @selection-change="onSelectionChange"
           >
-            <el-table-column type="selection" width="40" />
-            <el-table-column prop="item_id" label="ID" min-width="170" />
-            <el-table-column prop="state" label="状态" min-width="90" />
-            <el-table-column prop="created_at" label="创建时间" min-width="160" />
+            <el-table-column type="selection" width="40" :resizable="true" />
+            <el-table-column prop="item_id" label="ID" min-width="170" :resizable="true" />
+            <el-table-column prop="state" label="状态" min-width="90" :resizable="true" />
+            <el-table-column prop="created_at" label="创建时间" min-width="160" :resizable="true" />
           </el-table>
 
           <div class="ops-row">
@@ -69,8 +70,8 @@
             >
               开始回传所选 ({{ selectedRemoteIds.length }})
             </el-button>
-            <el-tag size="small" :type="rosConnected ? 'success' : 'warning'">
-              {{ rosConnected ? '无人机链路已连接' : '无人机链路未连接' }}
+            <el-tag size="small" :type="uavLinkConnected ? 'success' : 'warning'">
+              {{ uavLinkConnected ? '无人机链路已连接' : '无人机链路未连接' }}
             </el-tag>
           </div>
         </el-card>
@@ -80,7 +81,7 @@
 </template>
 
 <script setup>
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import {
   fetchLocalUAVRecords,
@@ -89,7 +90,7 @@ import {
   startUAVPullTransfer,
 } from '../api'
 
-const props = defineProps({
+defineProps({
   rosConnected: {
     type: Boolean,
     default: false,
@@ -101,6 +102,23 @@ const devices = ref([])
 const selectedDevice = ref('')
 const remoteItems = ref([])
 const selectedRemoteIds = ref([])
+const lastManifestUpdatedAt = ref(0)
+const nowSec = ref(Date.now() / 1000)
+
+let localPollingTimer = null
+let devicePollingTimer = null
+let manifestPollingTimer = null
+let heartbeatTimer = null
+
+const UAV_LINK_STALE_SECONDS = 20
+const UNKNOWN_TYPE_SET = new Set(['unknown', 'unknow', 'none', 'null', 'n/a', 'na', '-', '--'])
+
+const uavLinkConnected = computed(() => {
+  if (lastManifestUpdatedAt.value > 0) {
+    return (nowSec.value - lastManifestUpdatedAt.value) <= UAV_LINK_STALE_SECONDS
+  }
+  return devices.value.length > 0
+})
 
 const toFiniteNumber = (v) => {
   const n = Number(v)
@@ -123,19 +141,56 @@ const formatLatLon = (metadata) => {
 }
 
 const formatTypes = (metadata) => {
-  const typeList = Array.isArray(metadata?.types)
-    ? metadata.types.filter((item) => typeof item === 'string' && item.trim())
-    : []
-  if (typeList.length > 0) {
-    return typeList.join(' / ')
+  const typeOrder = []
+  const typeSet = new Set()
+
+  const pushType = (raw) => {
+    if (typeof raw !== 'string') {
+      return
+    }
+    const cleaned = raw.trim()
+    if (!cleaned) {
+      return
+    }
+    if (UNKNOWN_TYPE_SET.has(cleaned.toLowerCase())) {
+      return
+    }
+    if (!typeSet.has(cleaned)) {
+      typeSet.add(cleaned)
+      typeOrder.push(cleaned)
+    }
   }
 
-  const t = metadata?.type
-  if (typeof t === 'string' && t.trim()) {
-    return t.trim()
+  if (Array.isArray(metadata?.types)) {
+    metadata.types.forEach(pushType)
   }
 
-  return '-'
+  if (typeof metadata?.type === 'string') {
+    pushType(metadata.type)
+  }
+
+  const targets = metadata?.detection?.targets
+  if (Array.isArray(targets)) {
+    targets.forEach((target) => {
+      if (!target || typeof target !== 'object') {
+        return
+      }
+      pushType(target.type)
+      if (Array.isArray(target.rois)) {
+        target.rois.forEach((roi) => {
+          if (!roi || typeof roi !== 'object') {
+            return
+          }
+          pushType(roi.type)
+        })
+      }
+    })
+  }
+
+  if (typeOrder.length > 0) {
+    return typeOrder.join(', ')
+  }
+  return ''
 }
 
 const refreshLocal = async () => {
@@ -151,9 +206,18 @@ const refreshLocal = async () => {
 const refreshDevices = async () => {
   try {
     const resp = await fetchUAVDevices()
-    devices.value = resp.data.devices || []
-    if (!selectedDevice.value && devices.value.length > 0) {
-      selectedDevice.value = devices.value[0]
+    const nextDevices = Array.isArray(resp.data.devices) ? resp.data.devices : []
+    devices.value = nextDevices
+
+    if (selectedDevice.value && !nextDevices.includes(selectedDevice.value)) {
+      selectedDevice.value = ''
+      remoteItems.value = []
+      selectedRemoteIds.value = []
+      lastManifestUpdatedAt.value = 0
+    }
+
+    if (!selectedDevice.value && nextDevices.length > 0) {
+      selectedDevice.value = nextDevices[0]
     }
   } catch (error) {
     ElMessage.error('加载设备列表失败')
@@ -170,7 +234,11 @@ const refreshManifest = async () => {
     const resp = await fetchUAVDeviceManifest(selectedDevice.value)
     remoteItems.value = resp.data.items || []
     selectedRemoteIds.value = []
+    lastManifestUpdatedAt.value = Number(resp.data.updated_at || 0)
+    nowSec.value = Date.now() / 1000
   } catch (error) {
+    lastManifestUpdatedAt.value = 0
+    nowSec.value = Date.now() / 1000
     ElMessage.error('同步无人机清单失败')
     console.error(error)
   }
@@ -193,19 +261,71 @@ const startPull = async () => {
   }
 }
 
+const startAutoPolling = () => {
+  heartbeatTimer = setInterval(() => {
+    nowSec.value = Date.now() / 1000
+  }, 1000)
+
+  localPollingTimer = setInterval(() => {
+    refreshLocal()
+  }, 8000)
+
+  devicePollingTimer = setInterval(() => {
+    refreshDevices()
+  }, 5000)
+
+  manifestPollingTimer = setInterval(() => {
+    if (selectedDevice.value) {
+      refreshManifest()
+    }
+  }, 5000)
+}
+
+const stopAutoPolling = () => {
+  if (heartbeatTimer) {
+    clearInterval(heartbeatTimer)
+    heartbeatTimer = null
+  }
+  if (localPollingTimer) {
+    clearInterval(localPollingTimer)
+    localPollingTimer = null
+  }
+  if (devicePollingTimer) {
+    clearInterval(devicePollingTimer)
+    devicePollingTimer = null
+  }
+  if (manifestPollingTimer) {
+    clearInterval(manifestPollingTimer)
+    manifestPollingTimer = null
+  }
+}
+
+watch(selectedDevice, async (next, prev) => {
+  if (!next || next === prev) {
+    return
+  }
+  await refreshManifest()
+})
+
 onMounted(async () => {
   await refreshLocal()
   await refreshDevices()
   if (selectedDevice.value) {
     await refreshManifest()
   }
+  startAutoPolling()
+})
+
+onUnmounted(() => {
+  stopAutoPolling()
 })
 </script>
 
 <style scoped>
 .transfer-page {
-  padding: 16px;
+  padding: 16px 16px 12px;
   height: 100%;
+  box-sizing: border-box;
   overflow: hidden;
 }
 

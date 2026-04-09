@@ -20,7 +20,7 @@ from pydantic import BaseModel
 from modules.data_loader import load_disease_records
 from modules.image_utils import draw_bbox_on_image
 from modules.ros_manager import ROSManager
-from config.settings import DATA_PATH, MAP_TYPES, DISEASE_TYPES
+from config.settings import DATA_PATH, MAP_TYPES, DISEASE_TYPES, coordinate_converter
 
 app = FastAPI(title="Road Inspection System API")
 
@@ -136,6 +136,18 @@ def _strip_type(v: Any, default: str = "Unknown") -> str:
     return default
 
 
+_UNKNOWN_TYPE_VALUES = {"unknown", "unknow", "none", "null", "n/a", "na", "-", "--"}
+
+
+def _normalize_disease_type(v: Any) -> str:
+    s = _strip_type(v, "")
+    if not s:
+        return ""
+    if s.lower() in _UNKNOWN_TYPE_VALUES:
+        return ""
+    return s
+
+
 def _normalize_bbox(x: Any, y: Any, w: Any, h: Any) -> Optional[List[float]]:
     try:
         xf = float(x)
@@ -150,14 +162,14 @@ def _normalize_bbox(x: Any, y: Any, w: Any, h: Any) -> Optional[List[float]]:
 
 
 def _extract_boxes_from_payload(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
-    fallback_type = _strip_type(payload.get("type"), "Unknown")
+    fallback_type = _normalize_disease_type(payload.get("type"))
     boxes: List[Dict[str, Any]] = []
     seen = set()
 
     def add_box(box_type: str, bbox: Optional[List[float]]) -> None:
         if not bbox:
             return
-        t = _strip_type(box_type, fallback_type)
+        t = _normalize_disease_type(box_type) or fallback_type
         key = (t, round(bbox[0], 3), round(bbox[1], 3), round(bbox[2], 3), round(bbox[3], 3))
         if key in seen:
             return
@@ -167,7 +179,7 @@ def _extract_boxes_from_payload(payload: Dict[str, Any]) -> List[Dict[str, Any]]
     top_bbox = payload.get("bbox")
     if isinstance(top_bbox, list) and len(top_bbox) >= 4:
         add_box(
-            _strip_type(payload.get("type"), fallback_type),
+            _normalize_disease_type(payload.get("type")) or fallback_type,
             _normalize_bbox(top_bbox[0], top_bbox[1], top_bbox[2], top_bbox[3]),
         )
 
@@ -178,7 +190,7 @@ def _extract_boxes_from_payload(payload: Dict[str, Any]) -> List[Dict[str, Any]]
             for target in targets:
                 if not isinstance(target, dict):
                     continue
-                target_type = _strip_type(target.get("type"), fallback_type)
+                target_type = _normalize_disease_type(target.get("type")) or fallback_type
                 rois = target.get("rois")
                 if not isinstance(rois, list):
                     continue
@@ -189,7 +201,7 @@ def _extract_boxes_from_payload(payload: Dict[str, Any]) -> List[Dict[str, Any]]
                     if not isinstance(rect, dict):
                         continue
                     add_box(
-                        _strip_type(roi.get("type"), target_type),
+                        _normalize_disease_type(roi.get("type")) or target_type,
                         _normalize_bbox(
                             rect.get("x_offset", 0) or 0,
                             rect.get("y_offset", 0) or 0,
@@ -203,18 +215,18 @@ def _extract_boxes_from_payload(payload: Dict[str, Any]) -> List[Dict[str, Any]]
 
 def _pick_primary_type_bbox(boxes: List[Dict[str, Any]], fallback_type: str) -> tuple[str, List[float]]:
     if not boxes:
-        return _strip_type(fallback_type, "Unknown"), []
+        return fallback_type, []
 
     primary = max(
         boxes,
         key=lambda item: float(item.get("bbox", [0, 0, 0, 0])[2]) * float(item.get("bbox", [0, 0, 0, 0])[3]),
     )
-    return _strip_type(primary.get("type"), fallback_type), list(primary.get("bbox") or [])
+    return _normalize_disease_type(primary.get("type")) or fallback_type, list(primary.get("bbox") or [])
 
 
 def _extract_type_bbox_from_payload(payload: Dict[str, Any]) -> tuple[str, List[float]]:
     boxes = _extract_boxes_from_payload(payload)
-    return _pick_primary_type_bbox(boxes, _strip_type(payload.get("type"), "Unknown"))
+    return _pick_primary_type_bbox(boxes, _normalize_disease_type(payload.get("type")))
 
 
 def _normalize_uploaded_payload(payload: Any, item_id: str, file_name: str) -> Dict[str, Any]:
@@ -259,18 +271,23 @@ def _normalize_uploaded_payload(payload: Any, item_id: str, file_name: str) -> D
         }
 
     boxes = _extract_boxes_from_payload({**payload, "detection": detection})
-    disease_type, bbox = _pick_primary_type_bbox(boxes, _strip_type(payload.get("type"), "Unknown"))
-    type_list = sorted({
-        _strip_type(item.get("type"), "Unknown")
-        for item in boxes
-        if isinstance(item, dict)
-    })
+    disease_type, bbox = _pick_primary_type_bbox(boxes, _normalize_disease_type(payload.get("type")))
+    type_set = set()
+    for item in boxes:
+        if not isinstance(item, dict):
+            continue
+        t = _normalize_disease_type(item.get("type"))
+        if t:
+            type_set.add(t)
+    type_list = sorted(type_set)
 
     lat = _safe_float(payload.get("lat"))
     lon = _safe_float(payload.get("lon"))
     if lat is None or lon is None:
         lat = _safe_float(flight_state.get("lat"))
         lon = _safe_float(flight_state.get("lon"))
+    if lat is not None and lon is not None:
+        lat, lon = coordinate_converter(lat, lon)
 
     normalized = dict(payload)
     normalized["id"] = str(payload.get("id") or item_id)
@@ -278,7 +295,9 @@ def _normalize_uploaded_payload(payload: Any, item_id: str, file_name: str) -> D
     normalized["detection"] = detection
     normalized["flight_state"] = flight_state
     normalized["match"] = match
-    normalized["type"] = _strip_type(payload.get("type"), disease_type)
+    normalized["type"] = _normalize_disease_type(payload.get("type")) or disease_type
+    if not normalized["type"] and type_list:
+        normalized["type"] = type_list[0]
     normalized["bbox"] = payload.get("bbox") if isinstance(payload.get("bbox"), list) else bbox
     normalized["boxes"] = boxes
     normalized["types"] = type_list
@@ -350,7 +369,7 @@ def _build_disease_types() -> List[Dict[str, str]]:
     for item in DISEASE_TYPES:
         if not isinstance(item, dict):
             continue
-        value = _strip_type(item.get("value"), "")
+        value = _normalize_disease_type(item.get("value"))
         if not value or value in seen:
             continue
         base.append({
@@ -364,14 +383,14 @@ def _build_disease_types() -> List[Dict[str, str]]:
         if not isinstance(item, dict):
             continue
 
-        primary_type = _strip_type(item.get("type"), "")
+        primary_type = _normalize_disease_type(item.get("type"))
         if primary_type and primary_type != "all":
             dynamic_types.add(primary_type)
 
         types = item.get("types")
         if isinstance(types, list):
             for t in types:
-                value = _strip_type(t, "")
+                value = _normalize_disease_type(t)
                 if value and value != "all":
                     dynamic_types.add(value)
 
@@ -405,13 +424,16 @@ async def get_records():
 
         boxes = v.get("boxes") if isinstance(v.get("boxes"), list) else []
         if not boxes and isinstance(v.get("bbox"), list):
-            boxes = [{"type": _strip_type(v.get("type"), "Unknown"), "bbox": v.get("bbox", [])}]
+            boxes = [{"type": _normalize_disease_type(v.get("type")), "bbox": v.get("bbox", [])}]
 
-        type_list = sorted({
-            _strip_type(item.get("type"), "Unknown")
-            for item in boxes
-            if isinstance(item, dict)
-        })
+        type_set = set()
+        for item in boxes:
+            if not isinstance(item, dict):
+                continue
+            t = _normalize_disease_type(item.get("type"))
+            if t:
+                type_set.add(t)
+        type_list = sorted(type_set)
         target_count = len(boxes)
 
         # 多目标场景下使用全部框面积和作为热力图权重。
@@ -428,8 +450,8 @@ async def get_records():
                 continue
         bbox_area = max(1.0, raw_area / 1000.0)
 
-        disease_type = _strip_type(v.get("type"), "Unknown")
-        if disease_type == "Unknown" and type_list:
+        disease_type = _normalize_disease_type(v.get("type"))
+        if not disease_type and type_list:
             disease_type = type_list[0]
 
         records.append({
@@ -836,10 +858,17 @@ async def uav_upload_complete(upload_id: str, request: UploadCompleteRequest):
         "lat": lat,
         "lon": lon,
         "img_path": str(final_img_path),
-        "type": _strip_type(normalized_payload.get("type"), "Unknown"),
+        "type": _normalize_disease_type(normalized_payload.get("type")),
         "bbox": normalized_payload.get("bbox", []),
         "boxes": normalized_payload.get("boxes", []),
-        "types": normalized_payload.get("types", []),
+        "types": [
+            t
+            for t in (
+                _normalize_disease_type(x)
+                for x in (normalized_payload.get("types", []) or [])
+            )
+            if t
+        ],
         "target_count": int(normalized_payload.get("target_count") or 0),
         "count": 1,
         "channel": normalized_payload.get("channel"),

@@ -233,7 +233,8 @@ onUnmounted(() => {
 
 <style scoped>
 .app-container {
-  height: 100vh;
+  height: 100%;
+  width: 100%;
   background-color: #f5f5f5;
   position: relative;
   overflow: hidden;
@@ -244,6 +245,7 @@ onUnmounted(() => {
   box-shadow: 2px 0 6px rgba(0, 0, 0, 0.1);
   z-index: 1000;
   position: relative;
+  overflow: hidden;
   transition: width 0.3s ease-in-out;
 }
 
@@ -358,6 +360,7 @@ onUnmounted(() => {
 .content-area {
   height: 100%;
   width: 100%;
+  overflow: hidden;
 }
 
 .placeholder-content {

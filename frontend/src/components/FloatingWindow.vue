@@ -60,13 +60,24 @@ const props = defineProps({
 })
 
 const emit = defineEmits(['close'])
+const UNKNOWN_TYPE_SET = new Set(['unknown', 'unknow', 'none', 'null', 'n/a', 'na', '-', '--'])
+
+const normalizeType = (raw) => {
+  if (typeof raw !== 'string') {
+    return ''
+  }
+  const cleaned = raw.trim()
+  if (!cleaned) {
+    return ''
+  }
+  if (UNKNOWN_TYPE_SET.has(cleaned.toLowerCase())) {
+    return ''
+  }
+  return cleaned
+}
 
 const safeType = computed(() => {
-  const t = props.data?.type
-  if (typeof t === 'string' && t.trim()) {
-    return t.trim()
-  }
-  return 'Unknown'
+  return normalizeType(props.data?.type)
 })
 
 const safeId = computed(() => {
@@ -76,7 +87,7 @@ const safeId = computed(() => {
 
 const safeTypesText = computed(() => {
   const typeList = Array.isArray(props.data?.types)
-    ? props.data.types.filter((item) => typeof item === 'string' && item.trim())
+    ? props.data.types.map(normalizeType).filter(Boolean)
     : []
   if (typeList.length > 0) {
     return typeList.join(' / ')

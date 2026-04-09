@@ -36,6 +36,8 @@ class CaptureNode(Node):
         self.match_tolerance_s = float(self.declare_parameter("match_tolerance_s", 0.35).value)
         self.image_buffer_size = int(self.declare_parameter("image_buffer_size", 20).value)
         self.detection_buffer_size = int(self.declare_parameter("detection_buffer_size", 40).value)
+        self.image_transport = str(self.declare_parameter("image_transport", "compressed").value).strip().lower()
+        self.stats_log_interval_s = float(self.declare_parameter("stats_log_interval_s", 5.0).value)
 
         # 通道控制: 0 | 1 | both
         self.capture_channel = str(self.declare_parameter("capture_channel", "both").value).strip().lower()
@@ -79,6 +81,11 @@ class CaptureNode(Node):
                 "detection_buffer": deque(maxlen=max(2, self.detection_buffer_size)),
                 "latest_detection": self._default_detection_payload(),
                 "last_capture_sec": 0.0,
+                "image_count": 0,
+                "detection_count": 0,
+                "capture_count": 0,
+                "last_image_ns": 0,
+                "last_detection_ns": 0,
             }
 
         self.latest_flight_state: Dict[str, Any] = self._default_flight_state_payload()
@@ -89,14 +96,7 @@ class CaptureNode(Node):
             image_topic = self.channel_topics[channel]["image_topic"]
             detection_topic = self.channel_topics[channel]["detection_topic"]
 
-            self._subscriptions.append(
-                self.create_subscription(
-                    CompressedImage,
-                    image_topic,
-                    lambda msg, ch=channel: self.image_callback(ch, msg),
-                    10,
-                )
-            )
+            self._create_image_subscriptions(channel, image_topic)
             self._subscriptions.append(
                 self.create_subscription(
                     PerceptionTargets,
@@ -111,15 +111,41 @@ class CaptureNode(Node):
         )
 
         self.create_timer(0.2, self.capture_timer_callback)
+        self.create_timer(max(1.0, self.stats_log_interval_s), self.log_stats_timer_callback)
 
         self.get_logger().info(
             f"Capture node started | channels={self.active_channels} out={self.output_dir} "
-            f"status={self.status_file} interval={self.capture_interval_s}s match_tol={self.match_tolerance_s}s"
+            f"status={self.status_file} interval={self.capture_interval_s}s match_tol={self.match_tolerance_s}s "
+            f"image_transport={self.image_transport}"
+        )
+
+        for channel in self.active_channels:
+            image_topic = self.channel_topics[channel]["image_topic"]
+            detection_topic = self.channel_topics[channel]["detection_topic"]
+            self.get_logger().info(
+                f"ch{channel} topics | image={image_topic} detection={detection_topic}"
+            )
+
+    def _create_image_subscriptions(self, channel: str, image_topic: str):
+        mode = self.image_transport
+        if mode != "compressed":
+            self.get_logger().warning(
+                f"Only sensor_msgs/CompressedImage is supported, ignore image_transport={mode}"
+            )
+            self.image_transport = "compressed"
+
+        self._subscriptions.append(
+            self.create_subscription(
+                CompressedImage,
+                image_topic,
+                lambda msg, ch=channel: self.image_callback_compressed(ch, msg),
+                10,
+            )
         )
 
     @staticmethod
     def _resolve_active_channels(mode: str) -> List[str]:
-        m = str(mode or "").strip().lower()
+        m = str(mode or "").strip().strip('"\'').lower()
         if m in ("0", "channel0", "ch0", "cam0"):
             return ["0"]
         if m in ("1", "channel1", "ch1", "cam1"):
@@ -236,7 +262,7 @@ class CaptureNode(Node):
                 result[key] = value
         return result
 
-    def image_callback(self, channel: str, msg: CompressedImage):
+    def image_callback_compressed(self, channel: str, msg: CompressedImage):
         try:
             image = self.bridge.compressed_imgmsg_to_cv2(msg, desired_encoding="bgr8")
         except Exception as e:
@@ -247,6 +273,9 @@ class CaptureNode(Node):
         if image_ns <= 0:
             image_ns = int(self.get_clock().now().nanoseconds)
 
+        self._store_image(channel, image_ns, msg.header, image)
+
+    def _store_image(self, channel: str, image_ns: int, header: Any, image: Any):
         with self._lock:
             state = self.channel_state.get(channel)
             if state is None:
@@ -254,8 +283,10 @@ class CaptureNode(Node):
             state["image_buffer"].append({
                 "stamp_ns": image_ns,
                 "image": image,
-                "header": msg.header,
+                "header": header,
             })
+            state["image_count"] = int(state.get("image_count", 0)) + 1
+            state["last_image_ns"] = image_ns
 
     def detection_callback(self, channel: str, msg: PerceptionTargets):
         payload = self._perception_to_dict(msg)
@@ -272,6 +303,8 @@ class CaptureNode(Node):
                 "stamp_ns": det_ns,
                 "payload": payload,
             })
+            state["detection_count"] = int(state.get("detection_count", 0)) + 1
+            state["last_detection_ns"] = det_ns
 
     def flight_state_callback(self, msg: String):
         try:
@@ -401,6 +434,7 @@ class CaptureNode(Node):
             state = self.channel_state.get(channel)
             if state is not None:
                 state["last_capture_sec"] = now
+                state["capture_count"] = int(state.get("capture_count", 0)) + 1
 
         self.get_logger().info(f"captured: {item_id}")
 
@@ -408,6 +442,45 @@ class CaptureNode(Node):
         now = self.get_clock().now().nanoseconds / 1e9
         for channel in self.active_channels:
             self._capture_one_channel(channel, now)
+
+    def log_stats_timer_callback(self):
+        now_ns = int(self.get_clock().now().nanoseconds)
+        with self._lock:
+            snapshot = {
+                ch: {
+                    "image_count": int(st.get("image_count", 0)),
+                    "detection_count": int(st.get("detection_count", 0)),
+                    "capture_count": int(st.get("capture_count", 0)),
+                    "last_image_ns": int(st.get("last_image_ns", 0)),
+                    "last_detection_ns": int(st.get("last_detection_ns", 0)),
+                }
+                for ch, st in self.channel_state.items()
+            }
+
+        for channel in self.active_channels:
+            st = snapshot.get(channel, {})
+            image_count = int(st.get("image_count", 0))
+            det_count = int(st.get("detection_count", 0))
+            cap_count = int(st.get("capture_count", 0))
+            last_image_ns = int(st.get("last_image_ns", 0))
+            last_det_ns = int(st.get("last_detection_ns", 0))
+
+            image_age_s = -1.0
+            det_age_s = -1.0
+            if last_image_ns > 0:
+                image_age_s = max(0.0, (now_ns - last_image_ns) / 1_000_000_000.0)
+            if last_det_ns > 0:
+                det_age_s = max(0.0, (now_ns - last_det_ns) / 1_000_000_000.0)
+
+            self.get_logger().info(
+                f"ch{channel} stats | image={image_count} detection={det_count} capture={cap_count} "
+                f"image_age={image_age_s:.2f}s det_age={det_age_s:.2f}s"
+            )
+
+            if image_count == 0:
+                self.get_logger().warning(
+                    f"ch{channel} has no image yet, check topic={self.channel_topics[channel]['image_topic']}"
+                )
 
 
 def main(args=None):
