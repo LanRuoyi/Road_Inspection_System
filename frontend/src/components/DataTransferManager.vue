@@ -48,14 +48,16 @@
           </template>
 
           <el-table
+            ref="remoteTableRef"
             :data="remoteItems"
+            row-key="item_id"
             height="100%"
             size="small"
             class="pane-table"
             border
             @selection-change="onSelectionChange"
           >
-            <el-table-column type="selection" width="40" :resizable="true" />
+            <el-table-column type="selection" :reserve-selection="true" width="40" :resizable="true" />
             <el-table-column prop="item_id" label="ID" min-width="170" :resizable="true" />
             <el-table-column prop="state" label="状态" min-width="90" :resizable="true" />
             <el-table-column prop="created_at" label="创建时间" min-width="160" :resizable="true" />
@@ -81,7 +83,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import {
   fetchLocalUAVRecords,
@@ -104,10 +106,10 @@ const remoteItems = ref([])
 const selectedRemoteIds = ref([])
 const lastManifestUpdatedAt = ref(0)
 const nowSec = ref(Date.now() / 1000)
+const remoteTableRef = ref(null)
 
 let localPollingTimer = null
 let devicePollingTimer = null
-let manifestPollingTimer = null
 let heartbeatTimer = null
 
 const UAV_LINK_STALE_SECONDS = 20
@@ -231,9 +233,23 @@ const refreshManifest = async () => {
     return
   }
   try {
+    const prevSelectedSet = new Set(selectedRemoteIds.value)
     const resp = await fetchUAVDeviceManifest(selectedDevice.value)
-    remoteItems.value = resp.data.items || []
-    selectedRemoteIds.value = []
+    remoteItems.value = Array.isArray(resp?.data?.items) ? resp.data.items : []
+
+    await nextTick()
+
+    const nextSelectedIds = []
+    remoteItems.value.forEach((item) => {
+      const id = item?.item_id
+      if (!id || !prevSelectedSet.has(id)) return
+      nextSelectedIds.push(id)
+      if (remoteTableRef.value?.toggleRowSelection) {
+        remoteTableRef.value.toggleRowSelection(item, true)
+      }
+    })
+    selectedRemoteIds.value = nextSelectedIds
+
     lastManifestUpdatedAt.value = Number(resp.data.updated_at || 0)
     nowSec.value = Date.now() / 1000
   } catch (error) {
@@ -273,12 +289,6 @@ const startAutoPolling = () => {
   devicePollingTimer = setInterval(() => {
     refreshDevices()
   }, 5000)
-
-  manifestPollingTimer = setInterval(() => {
-    if (selectedDevice.value) {
-      refreshManifest()
-    }
-  }, 5000)
 }
 
 const stopAutoPolling = () => {
@@ -294,16 +304,13 @@ const stopAutoPolling = () => {
     clearInterval(devicePollingTimer)
     devicePollingTimer = null
   }
-  if (manifestPollingTimer) {
-    clearInterval(manifestPollingTimer)
-    manifestPollingTimer = null
-  }
 }
 
 watch(selectedDevice, async (next, prev) => {
   if (!next || next === prev) {
     return
   }
+  selectedRemoteIds.value = []
   await refreshManifest()
 })
 

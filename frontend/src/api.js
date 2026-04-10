@@ -10,6 +10,19 @@ const apiClient = axios.create({
 export const fetchMapTypes = () => apiClient.get('/map-types');
 export const fetchDiseaseTypes = () => apiClient.get('/disease-types');
 export const fetchRecords = () => apiClient.get('/records');
+export const fetchAnalysisConfig = () => apiClient.get('/analysis/config');
+export const assessAnalysisSegments = (segments = []) => apiClient.post('/analysis/assess', { segments });
+export const fetchAnalysisInstances = () => apiClient.get('/analysis/instances');
+export const saveAnalysisInstances = (instances = []) => apiClient.put('/analysis/instances', { instances });
+export const deleteAnalysisInstances = (instanceIds = []) => apiClient.delete('/analysis/instances', {
+  data: {
+    instance_ids: instanceIds
+  }
+});
+
+export const fetchSystemSettings = () => apiClient.get('/system/settings');
+export const saveSystemSettings = (settings = {}) => apiClient.put('/system/settings', settings);
+export const resetSystemSettings = () => apiClient.post('/system/settings/reset');
 
 export const connectROS = (payload) => apiClient.post('/ros/connect', payload);
 export const disconnectROS = () => apiClient.post('/ros/disconnect');

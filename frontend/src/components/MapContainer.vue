@@ -62,8 +62,53 @@ import * as LeafletMarkerCluster from 'leaflet.markercluster'
 // 正确导入 MarkerClusterGroup
 const MarkerClusterGroup = LeafletMarkerCluster.default || LeafletMarkerCluster
 import { ZoomIn, ZoomOut, Refresh } from '@element-plus/icons-vue'
-import { fetchMapTypes, fetchRecords, apiClient } from '../api';
+import { fetchMapTypes, fetchRecords, fetchSystemSettings, apiClient } from '../api';
 import FloatingWindow from './FloatingWindow.vue';
+
+const FALLBACK_CENTER = {
+  lat: 39.9042,
+  lon: 116.4074,
+}
+
+const DEFAULT_MAP_TYPES = [
+  {
+    value: 'normal',
+    label: '标准地图',
+    url: 'https://webrd0{s}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}',
+    subdomains: ['1', '2', '3', '4']
+  },
+  {
+    value: 'satellite',
+    label: '卫星地图',
+    url: 'https://webst0{s}.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}',
+    subdomains: ['1', '2', '3', '4']
+  },
+  {
+    value: 'terrain',
+    label: '地形地图',
+    url: 'https://webst0{s}.is.autonavi.com/appmaptile?style=7&x={x}&y={y}&z={z}',
+    subdomains: ['1', '2', '3', '4']
+  }
+]
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+const requestWithRetry = async (requestFn, { retries = 2, delayMs = 1200, label = '请求' } = {}) => {
+  let lastError = null
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await requestFn()
+    } catch (error) {
+      lastError = error
+      if (attempt >= retries) {
+        break
+      }
+      console.warn(`${label} 失败，${delayMs}ms 后重试（${attempt + 1}/${retries}）`, error)
+      await sleep(delayMs)
+    }
+  }
+  throw lastError
+}
 
 // 组件属性
 const props = defineProps({
@@ -79,6 +124,14 @@ const props = defineProps({
     type: String,
     default: 'all'
   },
+  startDate: {
+    type: String,
+    default: ''
+  },
+  endDate: {
+    type: String,
+    default: ''
+  },
   showHeatmap: {
     type: Boolean,
     default: false
@@ -86,8 +139,22 @@ const props = defineProps({
   sidebarWidth: {
     type: Number,
     default: 300
+  },
+  initialView: {
+    type: Object,
+    default: () => ({
+      lat: null,
+      lon: null,
+      zoom: null,
+    })
+  },
+  settingsVersion: {
+    type: Number,
+    default: 0
   }
 })
+
+const emit = defineEmits(['viewStateChange'])
 
 // 地图实例
 let map = null
@@ -123,10 +190,153 @@ const toFiniteNumber = (v) => {
   return Number.isFinite(n) ? n : null
 }
 
-// 监听病害类型变化，重新筛选标记点
-watch(() => props.diseaseType, (newType) => {
-  console.log('病害类型变化:', newType)
-  filterMarkersByType(newType)
+const isValidLatLon = (lat, lon) => {
+  return Number.isFinite(lat) && Number.isFinite(lon)
+    && lat >= -90 && lat <= 90
+    && lon >= -180 && lon <= 180
+}
+
+const isZeroLikeLocation = (lat, lon) => {
+  return Math.abs(lat) < 1e-6 && Math.abs(lon) < 1e-6
+}
+
+const parseRecordTimeMs = (record) => {
+  const parseRawTime = (raw) => {
+    if (raw == null) {
+      return null
+    }
+
+    if (typeof raw === 'number') {
+      if (!Number.isFinite(raw)) {
+        return null
+      }
+      return raw > 1e12 ? raw : raw * 1000
+    }
+
+    const text = String(raw).trim()
+    if (!text) {
+      return null
+    }
+
+    if (/^\d+$/.test(text)) {
+      const num = Number(text)
+      if (!Number.isFinite(num)) {
+        return null
+      }
+      return num > 1e12 ? num : num * 1000
+    }
+
+    const compactMatch = text.match(/^(\d{8})T(\d{6})/)
+    if (compactMatch) {
+      const d = compactMatch[1]
+      const t = compactMatch[2]
+      const y = Number(d.slice(0, 4))
+      const m = Number(d.slice(4, 6))
+      const day = Number(d.slice(6, 8))
+      const hh = Number(t.slice(0, 2))
+      const mm = Number(t.slice(2, 4))
+      const ss = Number(t.slice(4, 6))
+      const ms = new Date(y, m - 1, day, hh, mm, ss, 0).getTime()
+      return Number.isFinite(ms) ? ms : null
+    }
+
+    const parsed = Date.parse(text)
+    return Number.isFinite(parsed) ? parsed : null
+  }
+
+  const directCandidates = [
+    record?.created_at,
+    record?.timestamp,
+    record?.record_time,
+  ]
+
+  for (const candidate of directCandidates) {
+    const parsed = parseRawTime(candidate)
+    if (parsed != null) {
+      return parsed
+    }
+  }
+
+  return parseRawTime(record?.id)
+}
+
+const parseDayStartMs = (dateText) => {
+  if (typeof dateText !== 'string') {
+    return null
+  }
+  const text = dateText.trim()
+  if (!text) {
+    return null
+  }
+  const [y, m, d] = text.split('-').map(Number)
+  if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) {
+    return null
+  }
+  const ms = new Date(y, m - 1, d, 0, 0, 0, 0).getTime()
+  return Number.isFinite(ms) ? ms : null
+}
+
+const parseDayEndMs = (dateText) => {
+  if (typeof dateText !== 'string') {
+    return null
+  }
+  const text = dateText.trim()
+  if (!text) {
+    return null
+  }
+  const [y, m, d] = text.split('-').map(Number)
+  if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) {
+    return null
+  }
+  const ms = new Date(y, m - 1, d, 23, 59, 59, 999).getTime()
+  return Number.isFinite(ms) ? ms : null
+}
+
+const isRecordWithinTimeRange = (record, startDate, endDate) => {
+  const startMs = parseDayStartMs(startDate)
+  const endMs = parseDayEndMs(endDate)
+  if (startMs == null && endMs == null) {
+    return true
+  }
+
+  const recordMs = parseRecordTimeMs(record)
+  if (recordMs == null) {
+    return false
+  }
+
+  if (startMs != null && recordMs < startMs) {
+    return false
+  }
+  if (endMs != null && recordMs > endMs) {
+    return false
+  }
+  return true
+}
+
+const getInitialView = () => {
+  const lat = toFiniteNumber(props.initialView?.lat)
+  const lon = toFiniteNumber(props.initialView?.lon)
+  const zoom = toFiniteNumber(props.initialView?.zoom)
+  if (lat === null || lon === null || zoom === null) {
+    return null
+  }
+  return { lat, lon, zoom }
+}
+
+const emitViewState = () => {
+  if (!map) return
+  const center = map.getCenter()
+  emit('viewStateChange', {
+    lat: center.lat,
+    lon: center.lng,
+    zoom: map.getZoom(),
+  })
+}
+
+// 监听筛选条件变化，重新筛选标记点
+watch(() => [props.diseaseType, props.startDate, props.endDate], ([newType, startDate, endDate]) => {
+  console.log('病害筛选变化:', { type: newType, startDate, endDate })
+  filterMarkersByType(newType, startDate, endDate)
 })
 
 // 创建带图片缩略图的标记点图标
@@ -211,17 +421,54 @@ const createClusterIcon = (cluster) => {
 // 获取地图类型配置
 const fetchMapTypesData = async () => {
   try {
-    const response = await fetchMapTypes();
+    const response = await requestWithRetry(() => fetchMapTypes(), {
+      retries: 2,
+      delayMs: 1200,
+      label: '获取地图类型'
+    });
     mapTypes.value = Array.isArray(response.data) ? response.data : [];
+    if (mapTypes.value.length === 0) {
+      mapTypes.value = [...DEFAULT_MAP_TYPES];
+    }
     if (map) {
       switchMapLayer(props.mapType);
     }
   } catch (error) {
     console.error('获取地图类型失败:', error);
+    mapTypes.value = [...DEFAULT_MAP_TYPES];
+    if (map) {
+      switchMapLayer(props.mapType);
+    }
   }
 };
 
 const initCenterFromBrowserLocation = async () => {
+  const remembered = getInitialView()
+  if (remembered) {
+    if (isValidLatLon(remembered.lat, remembered.lon) && !isZeroLikeLocation(remembered.lat, remembered.lon)) {
+      currentLat.value = remembered.lat
+      currentLng.value = remembered.lon
+      return
+    }
+  }
+
+  try {
+    const settingsResp = await fetchSystemSettings()
+    const location = settingsResp?.data?.default_location
+    if (Array.isArray(location) && location.length >= 2) {
+      const lat = Number(location[0])
+      const lon = Number(location[1])
+      if (isValidLatLon(lat, lon) && !isZeroLikeLocation(lat, lon)) {
+        currentLat.value = lat
+        currentLng.value = lon
+      }
+    }
+  } catch (error) {
+    // 后端不可用时使用本地默认中心
+    currentLat.value = FALLBACK_CENTER.lat
+    currentLng.value = FALLBACK_CENTER.lon
+  }
+
   if (!navigator.geolocation) {
     return;
   }
@@ -231,7 +478,7 @@ const initCenterFromBrowserLocation = async () => {
       (position) => {
         const lat = Number(position?.coords?.latitude);
         const lon = Number(position?.coords?.longitude);
-        if (Number.isFinite(lat) && Number.isFinite(lon)) {
+        if (isValidLatLon(lat, lon) && !isZeroLikeLocation(lat, lon)) {
           currentLat.value = lat;
           currentLng.value = lon;
         }
@@ -251,7 +498,11 @@ const initCenterFromBrowserLocation = async () => {
 const loadDiseaseRecords = async () => {
   try {
     console.log('开始加载病害记录...');
-    const response = await fetchRecords();
+    const response = await requestWithRetry(() => fetchRecords(), {
+      retries: 2,
+      delayMs: 1200,
+      label: '加载病害记录'
+    });
     diseaseRecords.value = Array.isArray(response.data) ? response.data : [];
     console.log('成功加载病害记录:', diseaseRecords.value);
     
@@ -261,11 +512,13 @@ const loadDiseaseRecords = async () => {
     }
   } catch (error) {
     console.error('加载病害记录失败:', error);
+    diseaseRecords.value = [];
+    clearMarkers();
   }
 };
 
 // 根据病害类型筛选标记点
-const filterMarkersByType = (type) => {
+const filterMarkersByType = (type, startDate = props.startDate, endDate = props.endDate) => {
   console.log(`开始筛选标记点，类型: ${type}`);
   
   // 先清除地图上的所有标记点
@@ -276,13 +529,17 @@ const filterMarkersByType = (type) => {
   
   // 根据类型筛选标记点
   if (type === 'all') {
-    // 显示所有标记点
-    filteredMarkers.value = [...markers.value];
+    // 分布页选择全部时展示全部记录（包含无病害条目），仅受时间范围限制。
+    filteredMarkers.value = markers.value.filter(marker => {
+      const record = marker.options.record;
+      return isRecordWithinTimeRange(record, startDate, endDate);
+    });
   } else {
     // 只显示指定类型的标记点
     filteredMarkers.value = markers.value.filter(marker => {
       const record = marker.options.record;
       if (!record) return false;
+      if (!isRecordWithinTimeRange(record, startDate, endDate)) return false;
       const types = Array.isArray(record.types) ? record.types.filter(Boolean) : [];
       if (types.length > 0) {
         return types.includes(type);
@@ -312,8 +569,7 @@ const filterMarkersByType = (type) => {
   
   // 将聚合组添加到地图
   if (map && markerClusterGroup) {
-    // 如果热力图未开启，显示标记点
-    if (!props.showHeatmap) {
+    if (!map.hasLayer(markerClusterGroup) && filteredMarkers.value.length > 0) {
       map.addLayer(markerClusterGroup);
     }
   }
@@ -325,6 +581,11 @@ const filterMarkersByType = (type) => {
 // 更新图层显隐（控制 Marker 和 热力图）
 const updateLayersVisibility = () => {
   if (!map) return;
+
+  // 缩略图预览始终保留，热力图只做叠加层。
+  if (markerClusterGroup && !map.hasLayer(markerClusterGroup) && filteredMarkers.value.length > 0) {
+    map.addLayer(markerClusterGroup);
+  }
 
   // 1. 处理热力图
   if (props.showHeatmap) {
@@ -432,10 +693,7 @@ const updateLayersVisibility = () => {
         map.removeLayer(heatBgLayer);
         heatBgLayer = null;
       }
-      // 恢复图标显示
-      if (markerClusterGroup && !map.hasLayer(markerClusterGroup) && filteredMarkers.value.length > 0) {
-        map.addLayer(markerClusterGroup);
-      }
+      // 标记图层保持常驻，无需额外处理。
   }
 }
 // 监听热力图开关
@@ -515,7 +773,7 @@ const addMarkersToMap = () => {
   console.log(`总共添加了 ${markers.value.length} 个标记点`);
   
   // 初始筛选标记点
-  filterMarkersByType(props.diseaseType);
+  filterMarkersByType(props.diseaseType, props.startDate, props.endDate);
 };
 
 // 清除所有标记点
@@ -544,7 +802,7 @@ const switchMapLayer = (type) => {
   }
 
   // 查找对应的地图配置
-  const mapConfig = mapTypes.value.find((item) => item.value === type);
+  const mapConfig = mapTypes.value.find((item) => item.value === type) || mapTypes.value[0];
   if (!mapConfig || !mapConfig.url) {
     console.warn('未找到对应的地图配置或 URL 无效:', type);
     return;
@@ -593,7 +851,7 @@ const initMap = () => {
     // 创建地图实例
     map = L.map('map', {
       center: [currentLat.value, currentLng.value],
-      zoom: 13,
+      zoom: getInitialView()?.zoom || 13,
       zoomControl: false
     })
 
@@ -607,6 +865,8 @@ const initMap = () => {
 
     // 监听地图移动事件
     map.on('move', updateCoordinates)
+    map.on('moveend', emitViewState)
+    map.on('zoomend', emitViewState)
 
     // 强制刷新地图尺寸
     setTimeout(() => {
@@ -641,7 +901,12 @@ const zoomOut = () => {
 
 const resetView = () => {
   if (map) {
-    map.setView([currentLat.value, currentLng.value], 13)
+    const remembered = getInitialView()
+    if (remembered) {
+      map.setView([remembered.lat, remembered.lon], remembered.zoom)
+    } else {
+      map.setView([currentLat.value, currentLng.value], 13)
+    }
   }
 }
 
@@ -691,6 +956,10 @@ watch(() => props.mapType, (newType) => {
   }
 })
 
+watch(() => props.settingsVersion, async () => {
+  await fetchMapTypesData()
+})
+
 // 生命周期
 onMounted(() => {
   console.log('MapContainer组件已挂载')
@@ -699,6 +968,10 @@ onMounted(() => {
     await initCenterFromBrowserLocation()
     // 配置获取完成后初始化地图
     initMap()
+
+    setTimeout(() => {
+      emitViewState()
+    }, 120)
     
     // 地图初始化完成后加载病害记录
     setTimeout(() => {
@@ -708,6 +981,7 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  emitViewState()
   if (map) {
     map.remove()
   }

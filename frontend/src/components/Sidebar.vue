@@ -20,6 +20,11 @@
           <el-icon><MapLocation /></el-icon>
           <span class="menu-text" :class="{ 'collapsed': collapsed }">病害分布</span>
         </el-menu-item>
+
+        <el-menu-item index="disease-analysis">
+          <el-icon><Histogram /></el-icon>
+          <span class="menu-text" :class="{ 'collapsed': collapsed }">病害分析</span>
+        </el-menu-item>
         
         <el-menu-item index="real-time-monitor">
           <el-icon><VideoCamera /></el-icon>
@@ -41,7 +46,7 @@
     <!-- 功能内容区域（根据选择的功能动态变化） -->
     <div class="content-section" v-show="!collapsed">
       <!-- 病害分布功能内容 -->
-      <div v-if="activeTab === 'disease-distribution'" class="function-content">
+      <div v-if="activeTab === 'disease-distribution' || activeTab === 'disease-analysis'" class="function-content">
         <h4>病害分布设置</h4>
         <el-divider />
         <div class="setting-item">
@@ -70,6 +75,200 @@
           <span class="label">热力图：</span>
           <el-switch v-model="heatmapEnabled" size="small" />
         </div>
+        <div class="setting-item vertical-item">
+          <span class="label">时间范围：</span>
+          <div class="date-range-fields">
+            <el-date-picker
+              v-model="filterStartDate"
+              type="date"
+              size="small"
+              clearable
+              placeholder="开始日期"
+              format="YYYY-MM-DD"
+              value-format="YYYY-MM-DD"
+              style="width: 100%"
+            />
+            <el-date-picker
+              v-model="filterEndDate"
+              type="date"
+              size="small"
+              clearable
+              placeholder="结束日期"
+              format="YYYY-MM-DD"
+              value-format="YYYY-MM-DD"
+              style="width: 100%"
+            />
+          </div>
+        </div>
+
+        <template v-if="activeTab === 'disease-analysis'">
+          <el-divider />
+          <div class="analysis-header-row">
+            <h4 style="margin: 0;">病害分析设置</h4>
+            <el-radio-group v-model="analysisPanelMode" size="small">
+              <el-radio-button label="params">参数设置</el-radio-button>
+              <el-radio-button label="instances">实例管理</el-radio-button>
+            </el-radio-group>
+          </div>
+          <el-divider />
+          <template v-if="analysisPanelMode === 'params'">
+            <div class="setting-item vertical-item">
+              <span class="label">选中实例：</span>
+              <span style="font-size: 12px; color: #888; line-height: 1.5;">
+                {{ analysisSelectedCount > 0 ? `已选 ${analysisSelectedCount} 个路段实例` : '未选中实例（点击地图路段后显示参数）' }}
+              </span>
+            </div>
+
+            <template v-if="analysisSelectedCount > 0">
+              <div class="setting-item vertical-item">
+                <span class="sub-title">手动设置参数</span>
+                <span class="sub-hint">这些参数由你输入，修改后会触发后端重新评估。</span>
+              </div>
+
+              <div
+                class="setting-item"
+                v-for="item in analysisParamSchema"
+                :key="item.key"
+              >
+                <div class="label-with-tip">
+                  <span class="label">{{ item.label }}：</span>
+                  <el-tooltip
+                    v-if="item.description"
+                    :content="item.description"
+                    placement="top"
+                    :show-after="100"
+                  >
+                    <el-icon class="help-icon"><QuestionFilled /></el-icon>
+                  </el-tooltip>
+                </div>
+
+                <el-select
+                  v-if="item.input === 'select'"
+                  :model-value="analysisValues[item.key] ?? null"
+                  clearable
+                  size="small"
+                  placeholder="多实例值不同"
+                  style="width: 150px"
+                  @change="(value) => handleAnalysisParamChange(item, value)"
+                >
+                  <el-option
+                    v-for="opt in item.options || []"
+                    :key="opt.value"
+                    :label="opt.label"
+                    :value="opt.value"
+                  />
+                </el-select>
+
+                <el-input-number
+                  v-else-if="item.input === 'number'"
+                  :model-value="analysisValues[item.key] == null ? undefined : Number(analysisValues[item.key])"
+                  size="small"
+                  :min="item.min"
+                  :max="item.max"
+                  :step="item.step || 1"
+                  controls-position="right"
+                  style="width: 150px"
+                  @change="(value) => handleAnalysisParamChange(item, value)"
+                />
+
+                <el-input
+                  v-else
+                  :model-value="analysisValues[item.key] == null ? '' : String(analysisValues[item.key])"
+                  size="small"
+                  :placeholder="analysisValues[item.key] == null ? '多实例值不同' : ''"
+                  style="width: 150px"
+                  @change="(value) => handleAnalysisParamChange(item, value)"
+                />
+              </div>
+
+              <el-divider />
+
+              <div class="setting-item vertical-item">
+                <span class="sub-title">后端计算结果</span>
+                <span class="sub-hint">这些字段来自后端模型计算，为只读结果。</span>
+              </div>
+
+              <div
+                class="setting-item"
+                v-for="item in analysisResultSchema"
+                :key="`result-${item.key}`"
+              >
+                <div class="label-with-tip">
+                  <span class="label">{{ item.label }}：</span>
+                  <el-tooltip
+                    v-if="item.description"
+                    :content="item.description"
+                    placement="top"
+                    :show-after="100"
+                  >
+                    <el-icon class="help-icon"><QuestionFilled /></el-icon>
+                  </el-tooltip>
+                </div>
+
+                <el-tag size="small" type="info">
+                  {{ formatResultValue(analysisResultValues[item.key]) }}
+                </el-tag>
+              </div>
+
+              <div class="setting-item">
+                <el-button type="danger" size="small" style="width: 100%" @click="handleDeleteSelected">
+                  删除选中路段
+                </el-button>
+              </div>
+            </template>
+          </template>
+
+          <template v-else>
+            <div class="setting-item vertical-item">
+              <span class="sub-title">实例列表</span>
+              <span class="sub-hint">悬浮某行会在右侧地图定位并高亮该实例。</span>
+            </div>
+
+            <el-table
+              ref="analysisInstanceTableRef"
+              :data="analysisInstanceList"
+              row-key="id"
+              size="small"
+              height="280"
+              border
+              @selection-change="handleInstanceSelectionChange"
+              @cell-mouse-enter="handleInstanceCellEnter"
+              @cell-mouse-leave="handleInstanceCellLeave"
+            >
+              <el-table-column type="selection" width="40" :reserve-selection="true" />
+              <el-table-column prop="id" label="实例ID" min-width="110" show-overflow-tooltip />
+              <el-table-column label="状态" width="76">
+                <template #default="scope">
+                  <el-tag size="small" :type="getInstanceStatusTagType(scope.row.status)">
+                    {{ formatInstanceStatus(scope.row.status) }}
+                  </el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column prop="pointCount" label="点数" width="58" />
+              <el-table-column prop="matchedRecordCount" label="病害" width="58" />
+            </el-table>
+
+            <div class="setting-item" style="margin-top: 10px;">
+              <el-button
+                type="danger"
+                size="small"
+                style="width: 49%"
+                :disabled="managedInstanceIds.length === 0"
+                @click="handleDeleteManagedInstances"
+              >
+                删除勾选
+              </el-button>
+              <el-button
+                size="small"
+                style="width: 49%"
+                :disabled="analysisInstanceList.length === 0"
+                @click="handleDeleteAllInstances"
+              >
+                清空全部
+              </el-button>
+            </div>
+          </template>
+        </template>
       </div>
       
       <!-- 实时监看功能内容 -->
@@ -153,18 +352,13 @@
       
       <!-- 参数配置功能内容 -->
       <div v-else-if="activeTab === 'parameter-config'" class="function-content">
-        <h4>系统参数配置</h4>
+        <h4>参数配置</h4>
         <el-divider />
-        <div class="setting-item">
-          <span class="label">检测灵敏度：</span>
-          <el-slider v-model="sensitivity" :min="1" :max="10" size="small" />
-        </div>
-        <div class="setting-item">
-          <span class="label">自动保存：</span>
-          <el-switch v-model="autoSave" />
-        </div>
-        <div class="setting-item">
-          <el-button type="primary" size="small" style="width: 100%">保存配置</el-button>
+        <div class="setting-item vertical-item">
+          <span class="label">说明：</span>
+          <span style="font-size: 12px; color: #888; line-height: 1.5;">
+            参数配置已移动到右侧主界面，可直接浏览和编辑后端 settings 参数。
+          </span>
         </div>
       </div>
 
@@ -185,10 +379,12 @@ import { computed, ref, onMounted, watch, onUnmounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import {
   MapLocation,
+  Histogram,
   VideoCamera,
   Setting,
   VideoPlay,
-  Upload
+  Upload,
+  QuestionFilled
 } from '@element-plus/icons-vue'
 import {
   fetchMapTypes,
@@ -199,6 +395,60 @@ import {
   fetchROSTopics
 } from '../api'
 
+const DEFAULT_MAP_TYPES = [
+  {
+    value: 'normal',
+    label: '标准地图',
+    url: 'https://webrd0{s}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}',
+    subdomains: ['1', '2', '3', '4']
+  },
+  {
+    value: 'satellite',
+    label: '卫星地图',
+    url: 'https://webst0{s}.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}',
+    subdomains: ['1', '2', '3', '4']
+  },
+  {
+    value: 'terrain',
+    label: '地形地图',
+    url: 'https://webst0{s}.is.autonavi.com/appmaptile?style=7&x={x}&y={y}&z={z}',
+    subdomains: ['1', '2', '3', '4']
+  }
+]
+
+const DEFAULT_DISEASE_TYPES = [
+  { value: 'all', label: '全部' },
+  { value: 'fatigue_cracking', label: '疲劳裂缝' },
+  { value: 'rutting', label: '车辙' },
+  { value: 'potholes', label: '坑洞' },
+  { value: 'longitudinal_cracking', label: '纵向裂缝' },
+  { value: 'transverse_cracking', label: '横向裂缝' },
+  { value: 'block_cracking', label: '块状裂缝' },
+  { value: 'edge_cracking', label: '边缘裂缝' },
+  { value: 'patching', label: '修补' },
+  { value: 'bleeding', label: '泛油' },
+  { value: 'raveling', label: '松散/剥落' }
+]
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+const requestWithRetry = async (requestFn, { retries = 2, delayMs = 1200, label = '请求' } = {}) => {
+  let lastError = null
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await requestFn()
+    } catch (error) {
+      lastError = error
+      if (attempt >= retries) {
+        break
+      }
+      console.warn(`${label} 失败，${delayMs}ms 后重试（${attempt + 1}/${retries}）`, error)
+      await sleep(delayMs)
+    }
+  }
+  throw lastError
+}
+
 const props = defineProps({
   activeTab: {
     type: String,
@@ -207,6 +457,26 @@ const props = defineProps({
   collapsed: {
     type: Boolean,
     default: false
+  },
+  analysisConfig: {
+    type: Object,
+    default: () => ({
+      param_schema: [],
+      result_schema: []
+    })
+  },
+  analysisSelection: {
+    type: Object,
+    default: () => ({
+      selectedCount: 0,
+      instanceList: [],
+      values: {},
+      resultValues: {}
+    })
+  },
+  settingsVersion: {
+    type: Number,
+    default: 0
   }
 })
 
@@ -216,7 +486,12 @@ const emit = defineEmits([
   'mapTypeChange',
   'sidebarWidthChange',
   'diseaseTypeChange',
+  'timeRangeChange',
   'heatmapChange',
+  'analysisParamUpdate',
+  'analysisDeleteSelected',
+  'analysisDeleteInstances',
+  'analysisPreviewInstance',
   'rosConnectionChange',
   'rosSubscriptionsChange'
 ])
@@ -224,9 +499,14 @@ const emit = defineEmits([
 // 功能设置数据
 const mapType = ref('normal')
 const diseaseType = ref('all')
+const filterStartDate = ref('')
+const filterEndDate = ref('')
 const heatmapEnabled = ref(false)
-const sensitivity = ref(5)
-const autoSave = ref(true)
+const analysisPanelMode = ref('params')
+const analysisInstanceTableRef = ref(null)
+const managedInstanceIds = ref([])
+const hoveredInstanceId = ref('')
+let previewLeaveTimer = null
 
 const rosHost = ref('100.68.153.103')
 const rosPort = ref(9090)
@@ -236,6 +516,7 @@ const rosTopics = ref([])
 const selectedTopicType = ref('')
 const selectedTopicNames = ref([])
 let sidebarResizeObserver = null
+const MIXED_VALUE_TOKEN = '__MIXED__'
 const UNKNOWN_TYPE_SET = new Set(['unknown', 'unknow', 'none', 'null', 'n/a', 'na', '-', '--'])
 
 const isValidDiseaseType = (value) => {
@@ -263,6 +544,169 @@ const visibleRosTopics = computed(() => {
   })
 })
 
+const analysisParamSchema = computed(() => {
+  const schema = props.analysisConfig?.param_schema
+  return Array.isArray(schema) ? schema : []
+})
+
+const analysisResultSchema = computed(() => {
+  const schema = props.analysisConfig?.result_schema
+  return Array.isArray(schema) ? schema : []
+})
+
+const analysisSelectedCount = computed(() => {
+  return Number(props.analysisSelection?.selectedCount || 0)
+})
+
+const analysisValues = computed(() => {
+  const values = props.analysisSelection?.values
+  return values && typeof values === 'object' ? values : {}
+})
+
+const analysisResultValues = computed(() => {
+  const values = props.analysisSelection?.resultValues
+  return values && typeof values === 'object' ? values : {}
+})
+
+const analysisInstanceList = computed(() => {
+  const list = props.analysisSelection?.instanceList
+  return Array.isArray(list) ? list : []
+})
+
+const handleAnalysisParamChange = (item, rawValue) => {
+  if (!item?.key) return
+
+  if (item.input === 'select') {
+    if (rawValue == null || rawValue === '') return
+    emit('analysisParamUpdate', {
+      key: item.key,
+      value: rawValue
+    })
+    return
+  }
+
+  if (item.input === 'number') {
+    if (rawValue == null || rawValue === '') return
+    const numericValue = Number(rawValue)
+    if (!Number.isFinite(numericValue)) {
+      ElMessage.warning(`${item.label} 请输入数字`)
+      return
+    }
+    emit('analysisParamUpdate', {
+      key: item.key,
+      value: numericValue
+    })
+    return
+  }
+
+  const trimmed = String(rawValue ?? '').trim()
+  if (!trimmed) return
+  const numeric = Number(trimmed)
+  if (!Number.isFinite(numeric)) {
+    ElMessage.warning(`${item.label} 请输入数字`)
+    return
+  }
+
+  emit('analysisParamUpdate', {
+    key: item.key,
+    value: numeric
+  })
+}
+
+const formatResultValue = (value) => {
+  if (value === MIXED_VALUE_TOKEN) return '多实例值不同'
+  if (value == null) return '无数据'
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) return '--'
+    if (Math.abs(value) >= 100) return value.toFixed(1)
+    return value.toFixed(3).replace(/\.0+$/, '').replace(/(\.\d*[1-9])0+$/, '$1')
+  }
+  const text = String(value).trim()
+  return text || '--'
+}
+
+const formatInstanceStatus = (status) => {
+  const key = String(status || '').toLowerCase()
+  const map = {
+    no_data: '无数据',
+    healthy: '健康',
+    warning: '预警',
+    danger: '危险'
+  }
+  return map[key] || '未知'
+}
+
+const getInstanceStatusTagType = (status) => {
+  const key = String(status || '').toLowerCase()
+  if (key === 'healthy') return 'success'
+  if (key === 'warning') return 'warning'
+  if (key === 'danger') return 'danger'
+  return 'info'
+}
+
+const handleInstanceSelectionChange = (rows) => {
+  managedInstanceIds.value = rows.map((row) => row?.id).filter(Boolean)
+}
+
+const clearPreviewLeaveTimer = () => {
+  if (!previewLeaveTimer) return
+  clearTimeout(previewLeaveTimer)
+  previewLeaveTimer = null
+}
+
+const handleInstanceCellEnter = (row) => {
+  if (!row?.id) return
+  clearPreviewLeaveTimer()
+  const instanceId = String(row.id)
+  if (hoveredInstanceId.value === instanceId) {
+    return
+  }
+  hoveredInstanceId.value = instanceId
+  emit('analysisPreviewInstance', {
+    active: true,
+    instanceId,
+  })
+}
+
+const handleInstanceCellLeave = (row) => {
+  if (!row?.id) return
+  const instanceId = String(row.id)
+  clearPreviewLeaveTimer()
+  previewLeaveTimer = setTimeout(() => {
+    if (hoveredInstanceId.value !== instanceId) {
+      return
+    }
+    hoveredInstanceId.value = ''
+    emit('analysisPreviewInstance', {
+      active: false,
+      instanceId,
+    })
+  }, 40)
+}
+
+const handleDeleteManagedInstances = () => {
+  if (managedInstanceIds.value.length === 0) {
+    ElMessage.warning('请先勾选要删除的实例')
+    return
+  }
+  emit('analysisDeleteInstances', [...managedInstanceIds.value])
+  managedInstanceIds.value = []
+}
+
+const handleDeleteAllInstances = () => {
+  if (analysisInstanceList.value.length === 0) {
+    ElMessage.warning('当前没有可删除的实例')
+    return
+  }
+  const ids = analysisInstanceList.value.map((item) => item?.id).filter(Boolean)
+  emit('analysisDeleteInstances', ids)
+  managedInstanceIds.value = []
+}
+
+const handleDeleteSelected = () => {
+  emit('analysisDeleteSelected')
+}
+
 // 监听地图类型变化
 watch(mapType, (newType) => {
   emit('mapTypeChange', newType)
@@ -271,6 +715,13 @@ watch(mapType, (newType) => {
 // 监听病害类型变化
 watch(diseaseType, (newType) => {
   emit('diseaseTypeChange', newType)
+})
+
+watch([filterStartDate, filterEndDate], ([startDate, endDate]) => {
+  emit('timeRangeChange', {
+    startDate: startDate || '',
+    endDate: endDate || ''
+  })
 })
 
 // 监听热力图状态变化
@@ -284,14 +735,40 @@ const diseaseTypes = ref([])
 
 // 获取地图和病害类型数据
 const fetchMapAndDiseaseTypes = async () => {
-  const [mapResponse, diseaseResponse] = await Promise.all([
-    fetchMapTypes(),
-    fetchDiseaseTypes()
-  ])
+  try {
+    const [mapResponse, diseaseResponse] = await Promise.all([
+      requestWithRetry(() => fetchMapTypes(), {
+        retries: 2,
+        delayMs: 1200,
+        label: '获取地图类型'
+      }),
+      requestWithRetry(() => fetchDiseaseTypes(), {
+        retries: 2,
+        delayMs: 1200,
+        label: '获取病害类型'
+      })
+    ])
 
-  mapTypes.value = Array.isArray(mapResponse.data) ? mapResponse.data : []
-  diseaseTypes.value = (Array.isArray(diseaseResponse.data) ? diseaseResponse.data : [])
-    .filter((item) => item && isValidDiseaseType(item.value))
+    mapTypes.value = Array.isArray(mapResponse.data) ? mapResponse.data : []
+    diseaseTypes.value = (Array.isArray(diseaseResponse.data) ? diseaseResponse.data : [])
+      .filter((item) => item && isValidDiseaseType(item.value))
+  } catch (error) {
+    console.error('获取地图/病害类型失败，使用前端默认配置:', error)
+    ElMessage.warning('后端配置暂不可用，已使用本地默认设置')
+    mapTypes.value = [...DEFAULT_MAP_TYPES]
+    diseaseTypes.value = [...DEFAULT_DISEASE_TYPES]
+  }
+
+  if (!Array.isArray(mapTypes.value) || mapTypes.value.length === 0) {
+    mapTypes.value = [...DEFAULT_MAP_TYPES]
+  }
+  if (!Array.isArray(diseaseTypes.value) || diseaseTypes.value.length === 0) {
+    diseaseTypes.value = [...DEFAULT_DISEASE_TYPES]
+  }
+
+  if (!mapTypes.value.some((item) => item.value === mapType.value)) {
+    mapType.value = mapTypes.value[0]?.value || 'normal'
+  }
 
   if (!diseaseTypes.value.some((item) => item.value === diseaseType.value)) {
     diseaseType.value = 'all'
@@ -380,6 +857,42 @@ watch(selectedTopicType, async () => {
   await fetchROSTopicCatalog()
 })
 
+watch(analysisPanelMode, (mode) => {
+  if (mode === 'instances') {
+    return
+  }
+  clearPreviewLeaveTimer()
+  hoveredInstanceId.value = ''
+  managedInstanceIds.value = []
+  emit('analysisPreviewInstance', {
+    active: false,
+    instanceId: ''
+  })
+})
+
+watch(() => props.activeTab, (tab) => {
+  if (tab === 'disease-analysis') {
+    return
+  }
+  analysisPanelMode.value = 'params'
+  clearPreviewLeaveTimer()
+  hoveredInstanceId.value = ''
+  managedInstanceIds.value = []
+  emit('analysisPreviewInstance', {
+    active: false,
+    instanceId: ''
+  })
+})
+
+watch(analysisInstanceList, (list) => {
+  const idSet = new Set((Array.isArray(list) ? list : []).map((item) => item?.id).filter(Boolean))
+  managedInstanceIds.value = managedInstanceIds.value.filter((id) => idSet.has(id))
+})
+
+watch(() => props.settingsVersion, () => {
+  fetchMapAndDiseaseTypes()
+})
+
 // 生命周期
 onMounted(() => {
   fetchMapAndDiseaseTypes()
@@ -410,6 +923,12 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
+  clearPreviewLeaveTimer()
+  hoveredInstanceId.value = ''
+  emit('analysisPreviewInstance', {
+    active: false,
+    instanceId: ''
+  })
   if (sidebarResizeObserver) {
     sidebarResizeObserver.disconnect();
     sidebarResizeObserver = null;
@@ -540,6 +1059,13 @@ onUnmounted(() => {
   -ms-user-select: none;
 }
 
+.analysis-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
 .setting-item {
   margin-bottom: 15px;
   display: flex;
@@ -560,6 +1086,13 @@ onUnmounted(() => {
   gap: 8px;
 }
 
+.date-range-fields {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
 .label {
   font-size: 14px;
   color: #666;
@@ -569,6 +1102,29 @@ onUnmounted(() => {
   -moz-user-select: none;
   -ms-user-select: none;
   min-width: 80px;
+}
+
+.label-with-tip {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.help-icon {
+  color: #909399;
+  cursor: pointer;
+}
+
+.sub-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #303133;
+}
+
+.sub-hint {
+  font-size: 12px;
+  color: #909399;
+  line-height: 1.4;
 }
 
 :deep(.el-divider) {

@@ -24,10 +24,18 @@
         
         <Sidebar 
           :active-tab="activeTab" 
+          :analysis-config="analysisConfig"
+          :analysis-selection="analysisSelection"
+          :settings-version="settingsVersion"
           @tab-change="handleTabChange"
           @map-type-change="handleMapTypeChange"
           @disease-type-change="handleDiseaseTypeChange"
+          @time-range-change="handleTimeRangeChange"
           @heatmap-change="handleHeatmapChange"
+          @analysis-param-update="handleAnalysisParamUpdate"
+          @analysis-delete-selected="handleAnalysisDeleteSelected"
+          @analysis-delete-instances="handleAnalysisDeleteInstances"
+          @analysis-preview-instance="handleAnalysisPreviewInstance"
           @ros-connection-change="handleROSConnectionChange"
           @ros-subscriptions-change="handleROSSubscriptionsChange"
           :collapsed="isCollapsed"
@@ -42,9 +50,33 @@
           :sidebar-collapsed="isCollapsed" 
           :map-type="currentMapType" 
           :disease-type="currentDiseaseType"
+          :start-date="currentStartDate"
+          :end-date="currentEndDate"
           :show-heatmap="showHeatmap"
           :sidebar-width="isCollapsed ? getCollapsedWidth() : sidebarWidth"
+          :initial-view="distributionViewState"
+          :settings-version="settingsVersion"
+          @view-state-change="handleDistributionViewStateChange"
         />
+        </div>
+
+        <!-- 病害分析功能 -->
+        <div v-else-if="activeTab === 'disease-analysis'" class="content-area">
+          <RoadAnalysisContainer
+            :sidebar-collapsed="isCollapsed"
+            :map-type="currentMapType"
+            :disease-type="currentDiseaseType"
+            :start-date="currentStartDate"
+            :end-date="currentEndDate"
+            :show-heatmap="showHeatmap"
+            :sidebar-width="isCollapsed ? getCollapsedWidth() : sidebarWidth"
+            :analysis-config="analysisConfig"
+            :analysis-command="analysisCommand"
+            @analysis-selection-change="handleAnalysisSelectionChange"
+            :initial-view="analysisViewState"
+            :settings-version="settingsVersion"
+            @view-state-change="handleAnalysisViewStateChange"
+          />
         </div>
         
         <!-- 实时监看功能 -->
@@ -57,9 +89,7 @@
         
         <!-- 参数配置功能 -->
         <div v-else-if="activeTab === 'parameter-config'" class="content-area">
-          <div class="placeholder-content">
-            <el-empty description="参数配置功能开发中" />
-          </div>
+          <SettingsConfigPanel @settings-saved="handleSettingsSaved" />
         </div>
 
         <div v-else-if="activeTab === 'data-transfer'" class="content-area">
@@ -74,8 +104,11 @@
 import { ref, onMounted, onUnmounted } from 'vue'
 import Sidebar from './components/Sidebar.vue'
 import MapContainer from './components/MapContainer.vue'
+import RoadAnalysisContainer from './components/RoadAnalysisContainer.vue'
 import ROSRealtimeViewer from './components/ROSRealtimeViewer.vue'
 import DataTransferManager from './components/DataTransferManager.vue'
+import SettingsConfigPanel from './components/SettingsConfigPanel.vue'
+import { fetchAnalysisConfig } from './api'
 
 // 当前激活的功能标签
 const activeTab = ref('disease-distribution')
@@ -106,12 +139,64 @@ const currentMapType = ref('normal')
 // 当前病害类型
 const currentDiseaseType = ref('all')
 
+// 时间范围（YYYY-MM-DD），空字符串表示不限制
+const currentStartDate = ref('')
+const currentEndDate = ref('')
+
 // 热力图开关
 const showHeatmap = ref(false)
 
 // ROS 连接状态
 const rosConnected = ref(false)
 const selectedROSTopics = ref([])
+
+// 病害分析配置与交互状态
+const analysisConfig = ref({
+  instance_defaults: {
+    section_width_m: 7.5,
+    prediction_years: 3,
+    aadtt_k_per_day: 2,
+    traffic_growth_rate: 0.02,
+    lane_distribution_factor: 0.8,
+    surface_type: 'AC',
+    asphalt_thickness_m: 0.15,
+    base_thickness_m: 0.3,
+    subgrade_modulus_mpa: 50,
+    observed_pci_drop: 5,
+    observed_years: 1
+  },
+  param_schema: [],
+  result_schema: [],
+  thresholds: {},
+  status_colors: {}
+})
+
+const analysisSelection = ref({
+  selectedCount: 0,
+  selectedIds: [],
+  instanceList: [],
+  values: {},
+  resultValues: {}
+})
+
+const analysisCommand = ref({
+  seq: 0,
+  type: 'noop'
+})
+
+const settingsVersion = ref(0)
+
+const distributionViewState = ref({
+  lat: null,
+  lon: null,
+  zoom: null,
+})
+
+const analysisViewState = ref({
+  lat: null,
+  lon: null,
+  zoom: null,
+})
 
 // 计算折叠后的侧边栏宽度（基于视口宽度）
 const getCollapsedWidth = () => {
@@ -123,6 +208,117 @@ const handleTabChange = (tabName) => {
   activeTab.value = tabName
 }
 
+const pushAnalysisCommand = (payload) => {
+  const nextSeq = Number(analysisCommand.value?.seq || 0) + 1
+  analysisCommand.value = {
+    seq: nextSeq,
+    ...payload
+  }
+}
+
+const handleAnalysisSelectionChange = (payload) => {
+  analysisSelection.value = {
+    selectedCount: Number(payload?.selectedCount || 0),
+    selectedIds: Array.isArray(payload?.selectedIds) ? payload.selectedIds : [],
+    instanceList: Array.isArray(payload?.instanceList) ? payload.instanceList : [],
+    values: payload?.values && typeof payload.values === 'object' ? payload.values : {},
+    resultValues: payload?.resultValues && typeof payload.resultValues === 'object' ? payload.resultValues : {}
+  }
+}
+
+const handleAnalysisParamUpdate = ({ key, value }) => {
+  if (!key) return
+  pushAnalysisCommand({
+    type: 'apply-params',
+    params: {
+      [key]: value
+    }
+  })
+}
+
+const handleAnalysisDeleteSelected = () => {
+  pushAnalysisCommand({ type: 'delete-selected' })
+}
+
+const handleAnalysisDeleteInstances = (instanceIds) => {
+  pushAnalysisCommand({
+    type: 'delete-instance-ids',
+    instanceIds: Array.isArray(instanceIds) ? instanceIds : []
+  })
+}
+
+const handleAnalysisPreviewInstance = (payload) => {
+  const active = Boolean(payload?.active)
+  const instanceId = String(payload?.instanceId || '')
+  if (!active || !instanceId) {
+    pushAnalysisCommand({ type: 'clear-preview' })
+    return
+  }
+  pushAnalysisCommand({
+    type: 'preview-instance',
+    instanceId
+  })
+}
+
+const handleSettingsSaved = (settings) => {
+  const source = settings && typeof settings === 'object' ? settings : {}
+  settingsVersion.value += 1
+  analysisConfig.value = {
+    ...analysisConfig.value,
+    instance_defaults: {
+      ...analysisConfig.value.instance_defaults,
+      ...(source.analysis_instance_defaults || {})
+    },
+    param_schema: Array.isArray(source.analysis_param_schema)
+      ? source.analysis_param_schema
+      : analysisConfig.value.param_schema,
+    result_schema: Array.isArray(source.analysis_result_schema)
+      ? source.analysis_result_schema
+      : analysisConfig.value.result_schema,
+    thresholds: source.analysis_thresholds && typeof source.analysis_thresholds === 'object'
+      ? source.analysis_thresholds
+      : analysisConfig.value.thresholds,
+    status_colors: source.analysis_status_colors && typeof source.analysis_status_colors === 'object'
+      ? source.analysis_status_colors
+      : analysisConfig.value.status_colors,
+  }
+}
+
+const normalizeViewStatePayload = (payload) => {
+  const lat = Number(payload?.lat)
+  const lon = Number(payload?.lon)
+  const zoom = Number(payload?.zoom)
+  if (!Number.isFinite(lat) || !Number.isFinite(lon) || !Number.isFinite(zoom)) {
+    return null
+  }
+  if (Math.abs(lat) > 90 || Math.abs(lon) > 180) {
+    return null
+  }
+  if (zoom < 1 || zoom > 22) {
+    return null
+  }
+  if (Math.abs(lat) < 1e-6 && Math.abs(lon) < 1e-6) {
+    return null
+  }
+  return {
+    lat,
+    lon,
+    zoom,
+  }
+}
+
+const handleDistributionViewStateChange = (payload) => {
+  const normalized = normalizeViewStatePayload(payload)
+  if (!normalized) return
+  distributionViewState.value = normalized
+}
+
+const handleAnalysisViewStateChange = (payload) => {
+  const normalized = normalizeViewStatePayload(payload)
+  if (!normalized) return
+  analysisViewState.value = normalized
+}
+
 // 处理地图类型变化
 const handleMapTypeChange = (type) => {
   currentMapType.value = type
@@ -131,6 +327,43 @@ const handleMapTypeChange = (type) => {
 // 处理病害类型变化
 const handleDiseaseTypeChange = (type) => {
   currentDiseaseType.value = type
+}
+
+const normalizeDayText = (value) => {
+  if (typeof value !== 'string') {
+    return ''
+  }
+  const text = value.trim()
+  if (!text) {
+    return ''
+  }
+  return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : ''
+}
+
+const parseDayStartMs = (dayText) => {
+  const normalized = normalizeDayText(dayText)
+  if (!normalized) {
+    return null
+  }
+  const [y, m, d] = normalized.split('-').map(Number)
+  const ms = new Date(y, m - 1, d, 0, 0, 0, 0).getTime()
+  return Number.isFinite(ms) ? ms : null
+}
+
+const handleTimeRangeChange = (payload) => {
+  let startDate = normalizeDayText(payload?.startDate || '')
+  let endDate = normalizeDayText(payload?.endDate || '')
+
+  const startMs = parseDayStartMs(startDate)
+  const endMs = parseDayStartMs(endDate)
+  if (startMs != null && endMs != null && startMs > endMs) {
+    const tmp = startDate
+    startDate = endDate
+    endDate = tmp
+  }
+
+  currentStartDate.value = startDate
+  currentEndDate.value = endDate
 }
 
 // 处理热力图开关变化
@@ -165,6 +398,23 @@ const handleWindowResize = () => {
 onMounted(() => {
   calculateSidebarWidth()
   window.addEventListener('resize', handleWindowResize)
+
+  fetchAnalysisConfig()
+    .then((resp) => {
+      if (resp?.data && typeof resp.data === 'object') {
+        analysisConfig.value = {
+          ...analysisConfig.value,
+          ...resp.data,
+          instance_defaults: {
+            ...analysisConfig.value.instance_defaults,
+            ...(resp.data.instance_defaults || {})
+          }
+        }
+      }
+    })
+    .catch((error) => {
+      console.error('获取病害分析配置失败，使用前端默认值:', error)
+    })
 })
 
 // 组件卸载时移除监听器
