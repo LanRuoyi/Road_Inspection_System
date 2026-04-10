@@ -2,3 +2,10 @@
 	path = hobot_dnn_modified
 	url = https://github.com/LanRuoyi/hobot_dnn_modified
 	branch = ALL_IN_ONE
+[submodule "road_centering_controller"]
+	path = road_centering_controller
+	url = https://github.com/LanRuoyi/Road_Centering_Controller
+	branch = ALL_IN_ONE
+[submodule "uav_mission_pkg"]
+	path = uav_mission_pkg
+	url = https://github.com/LanRuoyi/uav_mission_pkg
