@@ -382,8 +382,57 @@ def _normalize_uploaded_payload(payload: Any, item_id: str, file_name: str) -> D
             "tolerance_ms": 0.0,
         }
 
-    boxes = _extract_boxes_from_payload({**payload, "detection": detection})
+    normalized = dict(payload)
+    for redundant_key in ("json_file", "type", "bbox", "lat", "lon", "boxes", "types", "target_count"):
+        normalized.pop(redundant_key, None)
+    normalized["id"] = str(payload.get("id") or item_id)
+    normalized["image_file"] = str(payload.get("image_file") or (DATA_PATH / file_name))
+    normalized["detection"] = detection
+    normalized["flight_state"] = flight_state
+    normalized["match"] = match
+    source_topics = payload.get("source_topics")
+    if not isinstance(source_topics, dict):
+        normalized["source_topics"] = {
+            "image_topic": "",
+            "detection_topic": "",
+            "flight_state_topic": "/uav/mavlink/state",
+        }
+    else:
+        normalized["source_topics"] = {
+            "image_topic": str(source_topics.get("image_topic", "") or ""),
+            "detection_topic": str(source_topics.get("detection_topic", "") or ""),
+            "flight_state_topic": str(source_topics.get("flight_state_topic", "/uav/mavlink/state") or "/uav/mavlink/state"),
+        }
+
+    image_stamp = payload.get("image_stamp")
+    if not isinstance(image_stamp, dict):
+        normalized["image_stamp"] = {"sec": 0, "nanosec": 0, "frame_id": ""}
+    else:
+        normalized["image_stamp"] = {
+            "sec": int(image_stamp.get("sec", 0) or 0),
+            "nanosec": int(image_stamp.get("nanosec", 0) or 0),
+            "frame_id": str(image_stamp.get("frame_id", "") or ""),
+        }
+    return normalized
+
+
+def _extract_converted_lat_lon(payload: Dict[str, Any]) -> tuple[Optional[float], Optional[float]]:
+    lat = _safe_float(payload.get("lat"))
+    lon = _safe_float(payload.get("lon"))
+    if lat is None or lon is None:
+        flight_state = payload.get("flight_state")
+        if isinstance(flight_state, dict):
+            lat = _safe_float(flight_state.get("lat"))
+            lon = _safe_float(flight_state.get("lon"))
+    if lat is not None and lon is not None:
+        lat, lon = coordinate_converter(lat, lon)
+    return lat, lon
+
+
+def _build_record_store_entry(payload: Dict[str, Any], final_img_path: Path) -> Dict[str, Any]:
+    boxes = _extract_boxes_from_payload(payload)
     disease_type, bbox = _pick_primary_type_bbox(boxes, _normalize_disease_type(payload.get("type")))
+
     type_set = set()
     for item in boxes:
         if not isinstance(item, dict):
@@ -393,30 +442,24 @@ def _normalize_uploaded_payload(payload: Any, item_id: str, file_name: str) -> D
             type_set.add(t)
     type_list = sorted(type_set)
 
-    lat = _safe_float(payload.get("lat"))
-    lon = _safe_float(payload.get("lon"))
-    if lat is None or lon is None:
-        lat = _safe_float(flight_state.get("lat"))
-        lon = _safe_float(flight_state.get("lon"))
-    if lat is not None and lon is not None:
-        lat, lon = coordinate_converter(lat, lon)
+    if not disease_type and type_list:
+        disease_type = type_list[0]
 
-    normalized = dict(payload)
-    normalized["id"] = str(payload.get("id") or item_id)
-    normalized["image_file"] = str(payload.get("image_file") or (DATA_PATH / file_name))
-    normalized["detection"] = detection
-    normalized["flight_state"] = flight_state
-    normalized["match"] = match
-    normalized["type"] = _normalize_disease_type(payload.get("type")) or disease_type
-    if not normalized["type"] and type_list:
-        normalized["type"] = type_list[0]
-    normalized["bbox"] = payload.get("bbox") if isinstance(payload.get("bbox"), list) else bbox
-    normalized["boxes"] = boxes
-    normalized["types"] = type_list
-    normalized["target_count"] = len(boxes)
-    normalized["lat"] = lat
-    normalized["lon"] = lon
-    return normalized
+    lat, lon = _extract_converted_lat_lon(payload)
+
+    return {
+        "lat": lat,
+        "lon": lon,
+        "img_path": str(final_img_path),
+        "type": disease_type,
+        "bbox": bbox,
+        "boxes": boxes,
+        "types": type_list,
+        "target_count": len(boxes),
+        "count": 1,
+        "channel": payload.get("channel"),
+        "created_at": payload.get("created_at"),
+    }
 
 def init_data():
     """初始化时加载所有 JSON 记录"""
@@ -1588,29 +1631,8 @@ async def uav_upload_complete(upload_id: str, request: UploadCompleteRequest):
         json.dump(normalized_payload, f, ensure_ascii=False, indent=2)
 
     # 同步更新内存记录，便于前端地图无需重启即可看到新数据
-    lat = _safe_float(normalized_payload.get("lat"))
-    lon = _safe_float(normalized_payload.get("lon"))
     file_id = Path(request.file_name).stem
-    records_store[file_id] = {
-        "lat": lat,
-        "lon": lon,
-        "img_path": str(final_img_path),
-        "type": _normalize_disease_type(normalized_payload.get("type")),
-        "bbox": normalized_payload.get("bbox", []),
-        "boxes": normalized_payload.get("boxes", []),
-        "types": [
-            t
-            for t in (
-                _normalize_disease_type(x)
-                for x in (normalized_payload.get("types", []) or [])
-            )
-            if t
-        ],
-        "target_count": int(normalized_payload.get("target_count") or 0),
-        "count": 1,
-        "channel": normalized_payload.get("channel"),
-        "created_at": normalized_payload.get("created_at"),
-    }
+    records_store[file_id] = _build_record_store_entry(normalized_payload, final_img_path)
 
     with upload_lock:
         upload_sessions.pop(upload_id, None)
