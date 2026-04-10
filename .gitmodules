@@ -1,0 +1,4 @@
+[submodule "hobot_dnn_modified"]
+	path = hobot_dnn_modified
+	url = https://github.com/LanRuoyi/hobot_dnn_modified
+	branch = ALL_IN_ONE
