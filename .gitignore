@@ -29,6 +29,7 @@ dist-ssr
 !requirements.txt
 data
 backend/scripts/
+backend/config/settings_runtime_override.json
 
 # Python cache files
 __pycache__/
@@ -41,3 +42,8 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+
+.claude
+CLAUDE.md
+
+run_project.bat
