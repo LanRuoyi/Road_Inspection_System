@@ -28,6 +28,7 @@ dist-ssr
 *.txt
 !requirements.txt
 data
+backend/scripts/
 
 # Python cache files
 __pycache__/
