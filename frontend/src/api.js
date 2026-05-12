@@ -26,7 +26,6 @@ export const resetSystemSettings = () => apiClient.post('/system/settings/reset'
 
 export const connectROS = (payload) => apiClient.post('/ros/connect', payload);
 export const disconnectROS = () => apiClient.post('/ros/disconnect');
-export const fetchROSStatus = () => apiClient.get('/ros/status');
 export const fetchROSTopicTypes = () => apiClient.get('/ros/topic-types');
 export const fetchROSTopics = (topicType = '') => {
   if (!topicType) {

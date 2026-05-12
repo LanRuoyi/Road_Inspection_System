@@ -56,59 +56,14 @@ if (typeof window !== 'undefined') {
 
 import 'leaflet/dist/leaflet.css'
 import 'leaflet.markercluster';
-import 'leaflet.heat'; 
-import * as LeafletMarkerCluster from 'leaflet.markercluster'
-
-// 正确导入 MarkerClusterGroup
-const MarkerClusterGroup = LeafletMarkerCluster.default || LeafletMarkerCluster
+import 'leaflet.heat';
 import { ZoomIn, ZoomOut, Refresh } from '@element-plus/icons-vue'
 import { fetchMapTypes, fetchRecords, fetchSystemSettings, apiClient } from '../api';
 import FloatingWindow from './FloatingWindow.vue';
 
-const FALLBACK_CENTER = {
-  lat: 39.9042,
-  lon: 116.4074,
-}
-
-const DEFAULT_MAP_TYPES = [
-  {
-    value: 'normal',
-    label: '标准地图',
-    url: 'https://webrd0{s}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}',
-    subdomains: ['1', '2', '3', '4']
-  },
-  {
-    value: 'satellite',
-    label: '卫星地图',
-    url: 'https://webst0{s}.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}',
-    subdomains: ['1', '2', '3', '4']
-  },
-  {
-    value: 'terrain',
-    label: '地形地图',
-    url: 'https://webst0{s}.is.autonavi.com/appmaptile?style=7&x={x}&y={y}&z={z}',
-    subdomains: ['1', '2', '3', '4']
-  }
-]
-
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
-
-const requestWithRetry = async (requestFn, { retries = 2, delayMs = 1200, label = '请求' } = {}) => {
-  let lastError = null
-  for (let attempt = 0; attempt <= retries; attempt++) {
-    try {
-      return await requestFn()
-    } catch (error) {
-      lastError = error
-      if (attempt >= retries) {
-        break
-      }
-      console.warn(`${label} 失败，${delayMs}ms 后重试（${attempt + 1}/${retries}）`, error)
-      await sleep(delayMs)
-    }
-  }
-  throw lastError
-}
+import { FALLBACK_CENTER, DEFAULT_MAP_TYPES, HEATMAP_GRADIENT, HEATMAP_DEFAULTS } from '../utils/constants'
+import { sleep, requestWithRetry, isValidLatLon, isZeroLikeLocation, toFiniteNumber, parseRecordTimeMs, parseDayStartMs, parseDayEndMs, isRecordWithinTimeRange } from '../utils/helpers'
+import { useMapCore } from '../composables/useMapCore'
 
 // 组件属性
 const props = defineProps({
@@ -156,18 +111,19 @@ const props = defineProps({
 
 const emit = defineEmits(['viewStateChange'])
 
-// 地图实例
+const {
+  currentLat,
+  currentLng,
+  mapTypes,
+  getInitialView,
+  emitViewState,
+} = useMapCore()
+
+// 地图 Leaflet 实例（非响应式）
 let map = null
 let currentLayer = null
-let heatLayer = null // 热力图层
-let heatBgLayer = null // 新增：热力图背景层
-
-// 当前坐标
-const currentLng = ref(116.3974)
-const currentLat = ref(39.9093)
-
-// 地图类型配置
-const mapTypes = ref([])
+let heatLayer = null
+let heatBgLayer = null
 
 // 存储所有病害记录
 const diseaseRecords = ref([])
@@ -184,154 +140,6 @@ let markerClusterGroup = null
 // 悬浮窗状态
 const floatingWindowVisible = ref(false)
 const selectedDisease = ref(null)
-
-const toFiniteNumber = (v) => {
-  const n = Number(v)
-  return Number.isFinite(n) ? n : null
-}
-
-const isValidLatLon = (lat, lon) => {
-  return Number.isFinite(lat) && Number.isFinite(lon)
-    && lat >= -90 && lat <= 90
-    && lon >= -180 && lon <= 180
-}
-
-const isZeroLikeLocation = (lat, lon) => {
-  return Math.abs(lat) < 1e-6 && Math.abs(lon) < 1e-6
-}
-
-const parseRecordTimeMs = (record) => {
-  const parseRawTime = (raw) => {
-    if (raw == null) {
-      return null
-    }
-
-    if (typeof raw === 'number') {
-      if (!Number.isFinite(raw)) {
-        return null
-      }
-      return raw > 1e12 ? raw : raw * 1000
-    }
-
-    const text = String(raw).trim()
-    if (!text) {
-      return null
-    }
-
-    if (/^\d+$/.test(text)) {
-      const num = Number(text)
-      if (!Number.isFinite(num)) {
-        return null
-      }
-      return num > 1e12 ? num : num * 1000
-    }
-
-    const compactMatch = text.match(/^(\d{8})T(\d{6})/)
-    if (compactMatch) {
-      const d = compactMatch[1]
-      const t = compactMatch[2]
-      const y = Number(d.slice(0, 4))
-      const m = Number(d.slice(4, 6))
-      const day = Number(d.slice(6, 8))
-      const hh = Number(t.slice(0, 2))
-      const mm = Number(t.slice(2, 4))
-      const ss = Number(t.slice(4, 6))
-      const ms = new Date(y, m - 1, day, hh, mm, ss, 0).getTime()
-      return Number.isFinite(ms) ? ms : null
-    }
-
-    const parsed = Date.parse(text)
-    return Number.isFinite(parsed) ? parsed : null
-  }
-
-  const directCandidates = [
-    record?.created_at,
-    record?.timestamp,
-    record?.record_time,
-  ]
-
-  for (const candidate of directCandidates) {
-    const parsed = parseRawTime(candidate)
-    if (parsed != null) {
-      return parsed
-    }
-  }
-
-  return parseRawTime(record?.id)
-}
-
-const parseDayStartMs = (dateText) => {
-  if (typeof dateText !== 'string') {
-    return null
-  }
-  const text = dateText.trim()
-  if (!text) {
-    return null
-  }
-  const [y, m, d] = text.split('-').map(Number)
-  if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) {
-    return null
-  }
-  const ms = new Date(y, m - 1, d, 0, 0, 0, 0).getTime()
-  return Number.isFinite(ms) ? ms : null
-}
-
-const parseDayEndMs = (dateText) => {
-  if (typeof dateText !== 'string') {
-    return null
-  }
-  const text = dateText.trim()
-  if (!text) {
-    return null
-  }
-  const [y, m, d] = text.split('-').map(Number)
-  if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) {
-    return null
-  }
-  const ms = new Date(y, m - 1, d, 23, 59, 59, 999).getTime()
-  return Number.isFinite(ms) ? ms : null
-}
-
-const isRecordWithinTimeRange = (record, startDate, endDate) => {
-  const startMs = parseDayStartMs(startDate)
-  const endMs = parseDayEndMs(endDate)
-  if (startMs == null && endMs == null) {
-    return true
-  }
-
-  const recordMs = parseRecordTimeMs(record)
-  if (recordMs == null) {
-    return false
-  }
-
-  if (startMs != null && recordMs < startMs) {
-    return false
-  }
-  if (endMs != null && recordMs > endMs) {
-    return false
-  }
-  return true
-}
-
-const getInitialView = () => {
-  const lat = toFiniteNumber(props.initialView?.lat)
-  const lon = toFiniteNumber(props.initialView?.lon)
-  const zoom = toFiniteNumber(props.initialView?.zoom)
-  if (lat === null || lon === null || zoom === null) {
-    return null
-  }
-  return { lat, lon, zoom }
-}
-
-const emitViewState = () => {
-  if (!map) return
-  const center = map.getCenter()
-  emit('viewStateChange', {
-    lat: center.lat,
-    lon: center.lng,
-    zoom: map.getZoom(),
-  })
-}
 
 // 监听筛选条件变化，重新筛选标记点
 watch(() => [props.diseaseType, props.startDate, props.endDate], ([newType, startDate, endDate]) => {
@@ -443,7 +251,7 @@ const fetchMapTypesData = async () => {
 };
 
 const initCenterFromBrowserLocation = async () => {
-  const remembered = getInitialView()
+  const remembered = getInitialView(props.initialView)
   if (remembered) {
     if (isValidLatLon(remembered.lat, remembered.lon) && !isZeroLikeLocation(remembered.lat, remembered.lon)) {
       currentLat.value = remembered.lat
@@ -649,20 +457,12 @@ const updateLayersVisibility = () => {
         
         // 2. 添加热力图层 (默认在 overlayPane, zIndex 400)
         heatLayer = L.heatLayer(heatData, {
-          radius: 50,      // 增大半径，从 25 -> 50
-          blur: 35,        // 增大模糊，过渡更柔和
-          maxZoom: 18,     // 关键设置：降低此值让热力图在缩小地图时也能保持红色强度（默认是18）
-          max: finalMax * 0.8, // 稍微降低阈值，让红色更容易出现
-          minOpacity: 0.0, // 设为0，让无数据区域完全透明，透出底下的蓝色背景
-          gradient: {
-            // 调整渐变：从透明(底色蓝) -> 浅蓝 -> 绿 -> 黄 -> 红
-            0.0: 'rgba(0,0,255,0)',  // 完全透明，显示背景蓝
-            0.2: 'rgba(0,0,255,0.8)',// 加深蓝
-            0.4: 'cyan',
-            0.6: 'lime', 
-            0.8: 'yellow',
-            1.0: 'red'
-          }
+          radius: HEATMAP_DEFAULTS.radius,
+          blur: HEATMAP_DEFAULTS.blur,
+          maxZoom: HEATMAP_DEFAULTS.maxZoom,
+          max: finalMax * HEATMAP_DEFAULTS.maxMultiplier,
+          minOpacity: HEATMAP_DEFAULTS.minOpacity,
+          gradient: HEATMAP_GRADIENT,
         });
         
         heatLayer.addTo(map);
@@ -851,7 +651,7 @@ const initMap = () => {
     // 创建地图实例
     map = L.map('map', {
       center: [currentLat.value, currentLng.value],
-      zoom: getInitialView()?.zoom || 13,
+      zoom: getInitialView(props.initialView)?.zoom || 13,
       zoomControl: false
     })
 
@@ -865,8 +665,8 @@ const initMap = () => {
 
     // 监听地图移动事件
     map.on('move', updateCoordinates)
-    map.on('moveend', emitViewState)
-    map.on('zoomend', emitViewState)
+    map.on('moveend', () => emitViewState(map, emit))
+    map.on('zoomend', () => emitViewState(map, emit))
 
     // 强制刷新地图尺寸
     setTimeout(() => {
@@ -901,7 +701,7 @@ const zoomOut = () => {
 
 const resetView = () => {
   if (map) {
-    const remembered = getInitialView()
+    const remembered = getInitialView(props.initialView)
     if (remembered) {
       map.setView([remembered.lat, remembered.lon], remembered.zoom)
     } else {
@@ -914,16 +714,6 @@ const resetView = () => {
 const closeFloatingWindow = () => {
   floatingWindowVisible.value = false;
   selectedDisease.value = null;
-}
-
-// 辅助函数
-const getDiseaseTypeTag = (type) => {
-  const typeMap = {
-    crack: 'danger',
-    pothole: 'warning',
-    subsidence: 'success'
-  }
-  return typeMap[type] || 'info'
 }
 
 const refreshMapViewport = () => {
@@ -970,7 +760,7 @@ onMounted(() => {
     initMap()
 
     setTimeout(() => {
-      emitViewState()
+      emitViewState(map, emit)
     }, 120)
     
     // 地图初始化完成后加载病害记录
@@ -981,7 +771,7 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
-  emitViewState()
+  emitViewState(map, emit)
   if (map) {
     map.remove()
   }

@@ -27,7 +27,7 @@ dist-ssr
 # 其他文件
 *.txt
 !requirements.txt
-data
+backend/data
 backend/scripts/
 backend/config/settings_runtime_override.json
 
@@ -47,3 +47,14 @@ venv.bak/
 CLAUDE.md
 
 run_project.bat
+
+# Runtime artifacts
+backend/data/upload_tmp/
+
+# Environment
+.env
+.env.*
+
+# Build artifacts
+*.egg-info/
+dist/

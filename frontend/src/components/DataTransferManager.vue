@@ -91,13 +91,10 @@ import {
   fetchUAVDeviceManifest,
   startUAVPullTransfer,
 } from '../api'
+import { UNKNOWN_TYPE_SET, POLLING } from '../utils/constants'
+import { toFiniteNumber } from '../utils/helpers'
 
-defineProps({
-  rosConnected: {
-    type: Boolean,
-    default: false,
-  },
-})
+defineProps({})
 
 const localRecords = ref([])
 const devices = ref([])
@@ -112,20 +109,12 @@ let localPollingTimer = null
 let devicePollingTimer = null
 let heartbeatTimer = null
 
-const UAV_LINK_STALE_SECONDS = 20
-const UNKNOWN_TYPE_SET = new Set(['unknown', 'unknow', 'none', 'null', 'n/a', 'na', '-', '--'])
-
 const uavLinkConnected = computed(() => {
   if (lastManifestUpdatedAt.value > 0) {
-    return (nowSec.value - lastManifestUpdatedAt.value) <= UAV_LINK_STALE_SECONDS
+    return (nowSec.value - lastManifestUpdatedAt.value) <= POLLING.UAV_LINK_STALE_SECONDS
   }
   return devices.value.length > 0
 })
-
-const toFiniteNumber = (v) => {
-  const n = Number(v)
-  return Number.isFinite(n) ? n : null
-}
 
 const formatLatLon = (metadata) => {
   let lat = toFiniteNumber(metadata?.lat)

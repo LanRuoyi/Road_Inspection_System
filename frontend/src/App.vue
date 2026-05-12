@@ -93,7 +93,7 @@
         </div>
 
         <div v-else-if="activeTab === 'data-transfer'" class="content-area">
-          <DataTransferManager :ros-connected="rosConnected" />
+          <DataTransferManager />
         </div>
       </el-main>
     </el-container>
@@ -109,6 +109,8 @@ import ROSRealtimeViewer from './components/ROSRealtimeViewer.vue'
 import DataTransferManager from './components/DataTransferManager.vue'
 import SettingsConfigPanel from './components/SettingsConfigPanel.vue'
 import { fetchAnalysisConfig } from './api'
+import { ANALYSIS_INSTANCE_DEFAULTS } from './utils/constants'
+import { parseDayStartMs, normalizeDayText } from './utils/helpers'
 
 // 当前激活的功能标签
 const activeTab = ref('disease-distribution')
@@ -152,19 +154,7 @@ const selectedROSTopics = ref([])
 
 // 病害分析配置与交互状态
 const analysisConfig = ref({
-  instance_defaults: {
-    section_width_m: 7.5,
-    prediction_years: 3,
-    aadtt_k_per_day: 2,
-    traffic_growth_rate: 0.02,
-    lane_distribution_factor: 0.8,
-    surface_type: 'AC',
-    asphalt_thickness_m: 0.15,
-    base_thickness_m: 0.3,
-    subgrade_modulus_mpa: 50,
-    observed_pci_drop: 5,
-    observed_years: 1
-  },
+  instance_defaults: { ...ANALYSIS_INSTANCE_DEFAULTS },
   param_schema: [],
   result_schema: [],
   thresholds: {},
@@ -327,27 +317,6 @@ const handleMapTypeChange = (type) => {
 // 处理病害类型变化
 const handleDiseaseTypeChange = (type) => {
   currentDiseaseType.value = type
-}
-
-const normalizeDayText = (value) => {
-  if (typeof value !== 'string') {
-    return ''
-  }
-  const text = value.trim()
-  if (!text) {
-    return ''
-  }
-  return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : ''
-}
-
-const parseDayStartMs = (dayText) => {
-  const normalized = normalizeDayText(dayText)
-  if (!normalized) {
-    return null
-  }
-  const [y, m, d] = normalized.split('-').map(Number)
-  const ms = new Date(y, m - 1, d, 0, 0, 0, 0).getTime()
-  return Number.isFinite(ms) ? ms : null
 }
 
 const handleTimeRangeChange = (payload) => {

@@ -40,9 +40,10 @@
 </template>
 
 <script setup>
-import { ref, computed, watch } from 'vue'
+import { ref, computed } from 'vue'
 import { Close } from '@element-plus/icons-vue'
 import { apiClient } from '../api'
+import { UNKNOWN_TYPE_SET } from '../utils/constants'
 
 const props = defineProps({
   data: {
@@ -60,7 +61,6 @@ const props = defineProps({
 })
 
 const emit = defineEmits(['close'])
-const UNKNOWN_TYPE_SET = new Set(['unknown', 'unknow', 'none', 'null', 'n/a', 'na', '-', '--'])
 
 const normalizeType = (raw) => {
   if (typeof raw !== 'string') {
@@ -144,13 +144,6 @@ const windowStyle = computed(() => {
 const close = () => {
   emit('close')
 }
-
-// 监听数据变化，自动显示
-watch(() => props.data, (newData) => {
-  if (newData && Object.keys(newData).length > 0) {
-    // 数据变化时自动显示
-  }
-})
 </script>
 
 <style scoped>

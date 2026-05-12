@@ -395,59 +395,8 @@ import {
   fetchROSTopics
 } from '../api'
 
-const DEFAULT_MAP_TYPES = [
-  {
-    value: 'normal',
-    label: '标准地图',
-    url: 'https://webrd0{s}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}',
-    subdomains: ['1', '2', '3', '4']
-  },
-  {
-    value: 'satellite',
-    label: '卫星地图',
-    url: 'https://webst0{s}.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}',
-    subdomains: ['1', '2', '3', '4']
-  },
-  {
-    value: 'terrain',
-    label: '地形地图',
-    url: 'https://webst0{s}.is.autonavi.com/appmaptile?style=7&x={x}&y={y}&z={z}',
-    subdomains: ['1', '2', '3', '4']
-  }
-]
-
-const DEFAULT_DISEASE_TYPES = [
-  { value: 'all', label: '全部' },
-  { value: 'fatigue_cracking', label: '疲劳裂缝' },
-  { value: 'rutting', label: '车辙' },
-  { value: 'potholes', label: '坑洞' },
-  { value: 'longitudinal_cracking', label: '纵向裂缝' },
-  { value: 'transverse_cracking', label: '横向裂缝' },
-  { value: 'block_cracking', label: '块状裂缝' },
-  { value: 'edge_cracking', label: '边缘裂缝' },
-  { value: 'patching', label: '修补' },
-  { value: 'bleeding', label: '泛油' },
-  { value: 'raveling', label: '松散/剥落' }
-]
-
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
-
-const requestWithRetry = async (requestFn, { retries = 2, delayMs = 1200, label = '请求' } = {}) => {
-  let lastError = null
-  for (let attempt = 0; attempt <= retries; attempt++) {
-    try {
-      return await requestFn()
-    } catch (error) {
-      lastError = error
-      if (attempt >= retries) {
-        break
-      }
-      console.warn(`${label} 失败，${delayMs}ms 后重试（${attempt + 1}/${retries}）`, error)
-      await sleep(delayMs)
-    }
-  }
-  throw lastError
-}
+import { DEFAULT_MAP_TYPES, DEFAULT_DISEASE_TYPES, MIXED_VALUE_TOKEN } from '../utils/constants'
+import { requestWithRetry, isValidDiseaseTypeValue as isValidDiseaseType } from '../utils/helpers'
 
 const props = defineProps({
   activeTab: {
@@ -516,19 +465,6 @@ const rosTopics = ref([])
 const selectedTopicType = ref('')
 const selectedTopicNames = ref([])
 let sidebarResizeObserver = null
-const MIXED_VALUE_TOKEN = '__MIXED__'
-const UNKNOWN_TYPE_SET = new Set(['unknown', 'unknow', 'none', 'null', 'n/a', 'na', '-', '--'])
-
-const isValidDiseaseType = (value) => {
-  if (typeof value !== 'string') {
-    return false
-  }
-  const cleaned = value.trim()
-  if (!cleaned) {
-    return false
-  }
-  return !UNKNOWN_TYPE_SET.has(cleaned.toLowerCase())
-}
 
 const visibleRosTopics = computed(() => {
   const allTopics = Array.isArray(rosTopics.value) ? rosTopics.value : []

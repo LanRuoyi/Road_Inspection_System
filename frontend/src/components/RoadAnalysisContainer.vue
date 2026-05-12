@@ -39,6 +39,11 @@
 <script setup>
 import { ref, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import L from 'leaflet'
+
+if (typeof window !== 'undefined') {
+  window.L = L
+}
+
 import * as turf from '@turf/turf'
 import 'leaflet/dist/leaflet.css'
 import 'leaflet.heat'
@@ -55,37 +60,9 @@ import {
 } from '../api'
 import FloatingWindow from './FloatingWindow.vue'
 
-const FALLBACK_CENTER = {
-  lat: 39.9042,
-  lon: 116.4074,
-}
-
-if (typeof window !== 'undefined') {
-  window.L = L
-}
-
-const MIXED_VALUE_TOKEN = '__MIXED__'
-
-const DEFAULT_MAP_TYPES = [
-  {
-    value: 'normal',
-    label: '标准地图',
-    url: 'https://webrd0{s}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}',
-    subdomains: ['1', '2', '3', '4']
-  },
-  {
-    value: 'satellite',
-    label: '卫星地图',
-    url: 'https://webst0{s}.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}',
-    subdomains: ['1', '2', '3', '4']
-  },
-  {
-    value: 'terrain',
-    label: '地形地图',
-    url: 'https://webst0{s}.is.autonavi.com/appmaptile?style=7&x={x}&y={y}&z={z}',
-    subdomains: ['1', '2', '3', '4']
-  }
-]
+import { FALLBACK_CENTER, DEFAULT_MAP_TYPES, MIXED_VALUE_TOKEN, FALLBACK_STATUS_COLORS, ANALYSIS_INSTANCE_DEFAULTS, HEATMAP_GRADIENT, HEATMAP_DEFAULTS } from '../utils/constants'
+import { toFiniteNumber, isValidLatLon, isZeroLikeLocation, isValidDiseaseTypeValue, parseRecordTimeMs, parseDayStartMs, parseDayEndMs, isRecordWithinTimeRange } from '../utils/helpers'
+import { useMapCore } from '../composables/useMapCore'
 
 const props = defineProps({
   sidebarCollapsed: {
@@ -147,15 +124,19 @@ const props = defineProps({
 
 const emit = defineEmits(['analysisSelectionChange', 'viewStateChange'])
 
+const {
+  currentLat,
+  currentLng,
+  mapTypes,
+  getInitialView,
+  emitViewState,
+} = useMapCore()
+
 let map = null
 let currentLayer = null
 let mapClickLock = false
-const mapTypes = ref([])
 let heatLayer = null
 let heatBgLayer = null
-
-const currentLng = ref(116.3974)
-const currentLat = ref(39.9093)
 
 const diseaseRecords = ref([])
 const filteredRecords = ref([])
@@ -175,7 +156,6 @@ const instanceLayers = new Map()
 const floatingWindowVisible = ref(false)
 const selectedDisease = ref(null)
 
-const UNKNOWN_TYPE_SET = new Set(['unknown', 'unknow', 'none', 'null', 'n/a', 'na', '-', '--'])
 
 let keyboardHandler = null
 let assessTimer = null
@@ -186,61 +166,12 @@ let lastPersistErrorAt = 0
 
 const previewInstanceId = ref('')
 
-const toFiniteNumber = (v) => {
-  const n = Number(v)
-  return Number.isFinite(n) ? n : null
-}
-
-const isValidLatLon = (lat, lon) => {
-  return Number.isFinite(lat) && Number.isFinite(lon)
-    && lat >= -90 && lat <= 90
-    && lon >= -180 && lon <= 180
-}
-
-const isZeroLikeLocation = (lat, lon) => {
-  return Math.abs(lat) < 1e-6 && Math.abs(lon) < 1e-6
-}
-
-const getInitialView = () => {
-  const lat = toFiniteNumber(props.initialView?.lat)
-  const lon = toFiniteNumber(props.initialView?.lon)
-  const zoom = toFiniteNumber(props.initialView?.zoom)
-  if (lat == null || lon == null || zoom == null) {
-    return null
-  }
-  return {
-    lat,
-    lon,
-    zoom,
-  }
-}
-
-const emitViewState = () => {
-  if (!map) return
-  const center = map.getCenter()
-  emit('viewStateChange', {
-    lat: center.lat,
-    lon: center.lng,
-    zoom: map.getZoom(),
-  })
-}
-
 const getNowId = () => `${Date.now()}_${Math.random().toString(16).slice(2, 8)}`
 
 const getDefaultParams = () => {
   const defaults = props.analysisConfig?.instance_defaults || {}
   return {
-    section_width_m: 7.5,
-    prediction_years: 3,
-    aadtt_k_per_day: 2,
-    traffic_growth_rate: 0.02,
-    lane_distribution_factor: 0.8,
-    surface_type: 'AC',
-    asphalt_thickness_m: 0.15,
-    base_thickness_m: 0.3,
-    subgrade_modulus_mpa: 50,
-    observed_pci_drop: 5,
-    observed_years: 1,
+    ...ANALYSIS_INSTANCE_DEFAULTS,
     ...defaults
   }
 }
@@ -250,14 +181,7 @@ const getStatusColor = (status) => {
   if (status && colorMap[status]) {
     return colorMap[status]
   }
-
-  const fallback = {
-    no_data: 'rgba(128, 128, 128, 0.35)',
-    healthy: 'rgba(46, 204, 113, 0.35)',
-    warning: 'rgba(241, 196, 15, 0.40)',
-    danger: 'rgba(231, 76, 60, 0.42)'
-  }
-  return fallback[status] || fallback.warning
+  return FALLBACK_STATUS_COLORS[status] || FALLBACK_STATUS_COLORS.warning
 }
 
 const createEndpointIcon = (isSelected) => {
@@ -283,126 +207,6 @@ const getRecordMarkerColor = (record) => {
   if (t.includes('bleeding')) return '#13c2c2'
   if (t.includes('raveling')) return '#722ed1'
   return '#1677ff'
-}
-
-const isValidDiseaseTypeValue = (value) => {
-  if (typeof value !== 'string') return false
-  const cleaned = value.trim()
-  if (!cleaned) return false
-  return !UNKNOWN_TYPE_SET.has(cleaned.toLowerCase())
-}
-
-const parseRecordTimeMs = (record) => {
-  const parseRawTime = (raw) => {
-    if (raw == null) {
-      return null
-    }
-
-    if (typeof raw === 'number') {
-      if (!Number.isFinite(raw)) {
-        return null
-      }
-      return raw > 1e12 ? raw : raw * 1000
-    }
-
-    const text = String(raw).trim()
-    if (!text) {
-      return null
-    }
-
-    if (/^\d+$/.test(text)) {
-      const num = Number(text)
-      if (!Number.isFinite(num)) {
-        return null
-      }
-      return num > 1e12 ? num : num * 1000
-    }
-
-    const compactMatch = text.match(/^(\d{8})T(\d{6})/)
-    if (compactMatch) {
-      const d = compactMatch[1]
-      const t = compactMatch[2]
-      const y = Number(d.slice(0, 4))
-      const m = Number(d.slice(4, 6))
-      const day = Number(d.slice(6, 8))
-      const hh = Number(t.slice(0, 2))
-      const mm = Number(t.slice(2, 4))
-      const ss = Number(t.slice(4, 6))
-      const ms = new Date(y, m - 1, day, hh, mm, ss, 0).getTime()
-      return Number.isFinite(ms) ? ms : null
-    }
-
-    const parsed = Date.parse(text)
-    return Number.isFinite(parsed) ? parsed : null
-  }
-
-  const directCandidates = [
-    record?.created_at,
-    record?.timestamp,
-    record?.record_time,
-  ]
-
-  for (const candidate of directCandidates) {
-    const parsed = parseRawTime(candidate)
-    if (parsed != null) {
-      return parsed
-    }
-  }
-
-  return parseRawTime(record?.id)
-}
-
-const parseDayStartMs = (dateText) => {
-  if (typeof dateText !== 'string') {
-    return null
-  }
-  const text = dateText.trim()
-  if (!text) {
-    return null
-  }
-  const [y, m, d] = text.split('-').map(Number)
-  if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) {
-    return null
-  }
-  const ms = new Date(y, m - 1, d, 0, 0, 0, 0).getTime()
-  return Number.isFinite(ms) ? ms : null
-}
-
-const parseDayEndMs = (dateText) => {
-  if (typeof dateText !== 'string') {
-    return null
-  }
-  const text = dateText.trim()
-  if (!text) {
-    return null
-  }
-  const [y, m, d] = text.split('-').map(Number)
-  if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) {
-    return null
-  }
-  const ms = new Date(y, m - 1, d, 23, 59, 59, 999).getTime()
-  return Number.isFinite(ms) ? ms : null
-}
-
-const isRecordWithinTimeRange = (record, startDate, endDate) => {
-  const startMs = parseDayStartMs(startDate)
-  const endMs = parseDayEndMs(endDate)
-  if (startMs == null && endMs == null) {
-    return true
-  }
-
-  const recordMs = parseRecordTimeMs(record)
-  if (recordMs == null) {
-    return false
-  }
-
-  if (startMs != null && recordMs < startMs) {
-    return false
-  }
-  if (endMs != null && recordMs > endMs) {
-    return false
-  }
-  return true
 }
 
 const hasSupportedDisease = (record) => {
@@ -527,19 +331,12 @@ const updateHeatLayer = () => {
   heatBgLayer.addTo(map)
 
   heatLayer = L.heatLayer(heatData, {
-    radius: 50,
-    blur: 35,
-    maxZoom: 18,
-    max: finalMax * 0.8,
-    minOpacity: 0.0,
-    gradient: {
-      0.0: 'rgba(0,0,255,0)',
-      0.2: 'rgba(0,0,255,0.8)',
-      0.4: 'cyan',
-      0.6: 'lime',
-      0.8: 'yellow',
-      1.0: 'red'
-    }
+    radius: HEATMAP_DEFAULTS.radius,
+    blur: HEATMAP_DEFAULTS.blur,
+    maxZoom: HEATMAP_DEFAULTS.maxZoom,
+    max: finalMax * HEATMAP_DEFAULTS.maxMultiplier,
+    minOpacity: HEATMAP_DEFAULTS.minOpacity,
+    gradient: { ...HEATMAP_GRADIENT }
   })
   heatLayer.addTo(map)
 }
@@ -701,7 +498,7 @@ const switchMapLayer = (type) => {
 }
 
 const initCenterFromBrowserLocation = async () => {
-  const remembered = getInitialView()
+  const remembered = getInitialView(props.initialView)
   if (remembered) {
     if (isValidLatLon(remembered.lat, remembered.lon) && !isZeroLikeLocation(remembered.lat, remembered.lon)) {
       currentLat.value = remembered.lat
@@ -814,7 +611,7 @@ const initMap = () => {
 
   map = L.map('analysis-map', {
     center: [currentLat.value, currentLng.value],
-    zoom: getInitialView()?.zoom || 13,
+    zoom: getInitialView(props.initialView)?.zoom || 13,
     zoomControl: false
   })
 
@@ -822,8 +619,8 @@ const initMap = () => {
 
   L.control.zoom({ position: 'topright' }).addTo(map)
   map.on('move', updateCoordinates)
-  map.on('moveend', emitViewState)
-  map.on('zoomend', emitViewState)
+  map.on('moveend', () => emitViewState(map, emit))
+  map.on('zoomend', () => emitViewState(map, emit))
   map.on('contextmenu', handleMapRightClick)
   map.on('click', () => {
     if (mapClickLock) {
@@ -1569,7 +1366,7 @@ const zoomOut = () => {
 
 const resetView = () => {
   if (map) {
-    const remembered = getInitialView()
+    const remembered = getInitialView(props.initialView)
     if (remembered) {
       map.setView([remembered.lat, remembered.lon], remembered.zoom)
     } else {
@@ -1661,7 +1458,7 @@ onMounted(async () => {
   initMap()
 
   setTimeout(() => {
-    emitViewState()
+    emitViewState(map, emit)
   }, 120)
 
   await loadInstances()
@@ -1676,7 +1473,7 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
-  emitViewState()
+  emitViewState(map, emit)
 
   if (keyboardHandler) {
     window.removeEventListener('keydown', keyboardHandler)
