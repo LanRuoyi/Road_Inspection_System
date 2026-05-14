@@ -599,7 +599,7 @@ const refreshDiseaseMarkers = () => {
     recordLayer.addLayer(marker)
   })
 
-  updateHeatLayer()
+  // 热力图由 filteredRecords 的 watcher 驱动，此处不再调用 updateHeatLayer
 }
 
 const initMap = () => {
@@ -1429,6 +1429,12 @@ watch(
     updateHeatLayer()
   }
 )
+
+watch(filteredRecords, () => {
+  if (props.showHeatmap) {
+    updateHeatLayer()
+  }
+})
 
 watch(
   () => props.analysisConfig?.instance_defaults,

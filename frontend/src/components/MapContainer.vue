@@ -147,6 +147,13 @@ watch(() => [props.diseaseType, props.startDate, props.endDate], ([newType, star
   filterMarkersByType(newType, startDate, endDate)
 })
 
+// 监听筛选后的标记点变化，自动更新热力图
+watch(filteredMarkers, () => {
+  if (props.showHeatmap) {
+    updateLayersVisibility()
+  }
+})
+
 // 创建带图片缩略图的标记点图标
 const createThumbnailMarker = (recordId, diseaseType) => {
   // 使用API基础URL构建图片URL
@@ -382,8 +389,6 @@ const filterMarkersByType = (type, startDate = props.startDate, endDate = props.
     }
   }
 
-  // 总是更新图层可见性以处理筛选后的热力图显示
-  updateLayersVisibility();
 };
 
 // 更新图层显隐（控制 Marker 和 热力图）
