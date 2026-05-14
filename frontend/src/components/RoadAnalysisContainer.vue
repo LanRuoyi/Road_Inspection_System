@@ -489,7 +489,9 @@ const switchMapLayer = (type) => {
     const url = config.url.replace('{s}', subdomain)
     currentLayer = L.tileLayer(url, {
       subdomains: config.subdomains || [],
-      attribution: config.attribution || '&copy; <a href="https://www.amap.com/">高德地图</a>'
+      attribution: config.attribution || '&copy; <a href="https://www.amap.com/">高德地图</a>',
+      maxNativeZoom: 18,
+      maxZoom: 22
     })
     currentLayer.addTo(map)
   } catch (error) {
@@ -612,7 +614,8 @@ const initMap = () => {
   map = L.map('analysis-map', {
     center: [currentLat.value, currentLng.value],
     zoom: getInitialView(props.initialView)?.zoom || 13,
-    zoomControl: false
+    zoomControl: false,
+    maxZoom: 22
   })
 
   switchMapLayer(props.mapType)

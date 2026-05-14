@@ -31,6 +31,14 @@
         </div>
       </div>
       
+      <!-- 通道切换控件 (仅双通道记录显示) -->
+      <div v-if="hasDualChannel" class="channel-toggle">
+        <el-radio-group v-model="activeChannel" size="small">
+          <el-radio-button :value="0">CH0 彩色</el-radio-button>
+          <el-radio-button :value="1">CH1 黑白</el-radio-button>
+        </el-radio-group>
+      </div>
+
       <!-- 图片显示区域 (固定比例60%) -->
       <div class="image-section">
         <img :src="imageUrl" alt="病害图片" class="preview-image" />
@@ -40,9 +48,9 @@
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { Close } from '@element-plus/icons-vue'
-import { apiClient } from '../api'
+import { apiClient, fetchRecordImageUrl } from '../api'
 import { UNKNOWN_TYPE_SET } from '../utils/constants'
 
 const props = defineProps({
@@ -112,13 +120,31 @@ const safeLatLon = computed(() => {
   return '-'
 })
 
-// 图片URL
+// 通道切换
+const activeChannel = ref(0)
+
+const hasDualChannel = computed(() => {
+  return Boolean(props.data?.has_dual_channel)
+})
+
+// 图片URL (支持通道切换)
 const imageUrl = computed(() => {
   if (props.data?.id == null) {
     return ''
   }
-  return `${apiClient.defaults.baseURL}/image/${props.data.id}`
+  if (hasDualChannel.value) {
+    return fetchRecordImageUrl(props.data.id, activeChannel.value)
+  }
+  return fetchRecordImageUrl(props.data.id)
 })
+
+// 切换记录时重置通道为 CH0
+watch(
+  () => props.data?.id,
+  () => {
+    activeChannel.value = 0
+  }
+)
 
 // 悬浮窗位置和大小计算（基于可用空间比例）
 const windowStyle = computed(() => {
@@ -226,6 +252,13 @@ const close = () => {
   /* padding-top: 16px; */
   /* padding-bottom: 16px; */
   overflow: hidden; /* 防止图片溢出 */
+}
+
+.channel-toggle {
+  flex: 0 0 auto;
+  display: flex;
+  justify-content: center;
+  padding: 8px 0 12px 0;
 }
 
 .preview-image {

@@ -8,7 +8,7 @@ import hashlib
 import math
 from copy import deepcopy
 from pathlib import Path
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi import Request
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -64,6 +64,8 @@ class DiseaseRecord(BaseModel):
     types: List[str] = []
     target_count: int = 0
     created_at: Optional[str] = None
+    channels: Optional[Dict[str, str]] = None  # {"0": record_id, "1": record_id} for merged records
+    has_dual_channel: bool = False
 
 class MapType(BaseModel):
     value: str
@@ -375,15 +377,9 @@ def _apply_settings_overrides(payload: Dict[str, Any], persist: bool = False) ->
             ANALYSIS_INSTANCE_DEFAULTS.clear()
             ANALYSIS_INSTANCE_DEFAULTS.update(payload.get("analysis_instance_defaults") or {})
 
-        if "analysis_param_schema" in payload:
-            schema = payload.get("analysis_param_schema")
-            if isinstance(schema, list):
-                ANALYSIS_PARAM_SCHEMA[:] = [item for item in schema if isinstance(item, dict)]
-
-        if "analysis_result_schema" in payload:
-            result_schema = payload.get("analysis_result_schema")
-            if isinstance(result_schema, list):
-                ANALYSIS_RESULT_SCHEMA[:] = [item for item in result_schema if isinstance(item, dict)]
+        # analysis_param_schema 和 analysis_result_schema 由 settings.py 定义，
+        # 不通过运行时覆盖修改，避免前端保存时回传旧版 schema 造成污染。
+        # 如需修改，直接编辑 settings.py 后重启服务。
 
         if "analysis_thresholds" in payload and isinstance(payload.get("analysis_thresholds"), dict):
             ANALYSIS_THRESHOLDS.clear()
@@ -395,7 +391,11 @@ def _apply_settings_overrides(payload: Dict[str, Any], persist: bool = False) ->
 
         runtime_settings = _collect_runtime_settings()
         if persist:
-            _safe_json_write(SETTINGS_OVERRIDE_PATH, runtime_settings)
+            # 写入文件前剔除代码定义的 schema（不应被运行时持久化覆盖）
+            clean = dict(runtime_settings)
+            clean.pop("analysis_param_schema", None)
+            clean.pop("analysis_result_schema", None)
+            _safe_json_write(SETTINGS_OVERRIDE_PATH, clean)
         return runtime_settings
 
 
@@ -478,6 +478,10 @@ async def get_records():
     """
     records = []
     for k, v in records_store.items():
+        # Skip alias entries — merged records already cover them
+        if v.get("_is_alias"):
+            continue
+
         lat = _safe_float(v.get("lat"))
         lon = _safe_float(v.get("lon"))
         if lat is None or lon is None:
@@ -521,8 +525,22 @@ async def get_records():
                 continue
         bbox_area = max(1.0, raw_area / 1000.0)
 
+        # Build channel info for dual-channel merged records
+        channels = None
+        has_dual = False
+        channels_dict = v.get("channels")
+        if isinstance(channels_dict, dict):
+            has_dual = True
+            channels = {}
+            for ch_key in ("0", "1"):
+                ch_info = channels_dict.get(ch_key)
+                if isinstance(ch_info, dict):
+                    channels[ch_key] = ch_info.get("record_id", "")
+                else:
+                    channels[ch_key] = ""
+
         records.append({
-            "id": k, 
+            "id": k,
             "lat": lat,
             "lon": lon,
             "type": disease_type,
@@ -530,35 +548,65 @@ async def get_records():
             "types": type_list,
             "target_count": target_count,
             "created_at": str(v.get("created_at") or "").strip() or None,
+            "channels": channels,
+            "has_dual_channel": has_dual,
         })
     return records
 
+@app.post("/api/records/reload")
+async def reload_records():
+    init_data()
+    return {"ok": True, "count": len(records_store)}
+
 @app.get("/api/image/{record_id}")
-async def get_image(record_id: str):
+async def get_image(record_id: str, channel: Optional[int] = Query(None)):
     """
     接口 2: 根据 ID 返回实时渲染 BBox 的图片流
+    Query params:
+        channel: 0 or 1 — which channel's image to serve (for dual-channel records)
     """
-    if record_id not in records_store:
+    record = records_store.get(record_id)
+    if record is None:
         raise HTTPException(status_code=404, detail="Record not found")
-    
-    record = records_store[record_id]
-    
-    # 绘制多目标 BBox（按类别区分颜色）
+
+    # Resolve merged record for boxes (alias entries use merged boxes)
+    if record.get("_is_alias"):
+        merged_id = record.get("_merged_id")
+        if merged_id and merged_id in records_store:
+            merged_record = records_store[merged_id]
+        else:
+            merged_record = record
+    else:
+        merged_record = record
+
+    # Determine which image file to load
+    img_path = record.get("img_path")
+    if channel is not None:
+        # Use specified channel's image
+        channels_dict = merged_record.get("channels") or record.get("channels")
+        if isinstance(channels_dict, dict):
+            ch_key = str(channel)
+            ch_info = channels_dict.get(ch_key)
+            if isinstance(ch_info, dict) and ch_info.get("img_path"):
+                img_path = ch_info["img_path"]
+            elif isinstance(ch_info, str) and ch_info:
+                img_path = ch_info
+
+    # Always draw merged boxes
     img = draw_bbox_on_image(
-        record['img_path'],
-        record.get('bbox', []),
-        record.get('type', 'Unknown'),
-        boxes=record.get('boxes', []),
+        img_path,
+        merged_record.get("bbox", []),
+        merged_record.get("type", "Unknown"),
+        boxes=merged_record.get("boxes", []),
     )
-    
+
     if img is None:
         raise HTTPException(status_code=500, detail="Image processing failed")
-    
-    # 将 OpenCV 图像编码为 JPEG 格式的字节流
+
     res, frame = cv2.imencode('.jpg', img)
     if not res:
         raise HTTPException(status_code=500, detail="Image encoding failed")
-    
+
     return StreamingResponse(io.BytesIO(frame.tobytes()), media_type="image/jpeg")
 
 @app.get("/api/map-types", response_model=List[MapType])
@@ -954,8 +1002,8 @@ async def uav_upload_complete(upload_id: str, request: UploadCompleteRequest):
         json.dump(normalized_payload, f, ensure_ascii=False, indent=2)
 
     # 同步更新内存记录，便于前端地图无需重启即可看到新数据
-    file_id = Path(request.file_name).stem
-    records_store[file_id] = _build_record_store_entry(normalized_payload, final_img_path)
+    # Re-run pairing so the new file is paired with any existing counterpart
+    init_data()
 
     with upload_lock:
         upload_sessions.pop(upload_id, None)
@@ -970,6 +1018,7 @@ async def uav_upload_complete(upload_id: str, request: UploadCompleteRequest):
 
 @app.get("/api/uav/local-records")
 async def uav_local_records():
+    init_data()  # 自动同步 records_store，让地图和分析也能看到新文件
     DATA_PATH.mkdir(parents=True, exist_ok=True)
     records = []
     for json_file in sorted(DATA_PATH.glob("*.json")):

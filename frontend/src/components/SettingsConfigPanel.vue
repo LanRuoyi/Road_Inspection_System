@@ -308,8 +308,8 @@ const buildSavePayload = () => {
     analysis_instance_defaults: rowsToObject(instanceDefaultRows.value, parseAutoScalar),
     analysis_thresholds: rowsToObject(thresholdRows.value, parseAutoScalar),
     analysis_status_colors: rowsToObject(statusColorRows.value, (value) => String(value ?? '').trim()),
-    analysis_param_schema: settingsForm.analysis_param_schema,
-    analysis_result_schema: settingsForm.analysis_result_schema,
+    // analysis_param_schema / analysis_result_schema 由后端 settings.py 定义，
+    // 前端仅作只读展示，不在保存时回传，避免覆盖后端的正确 schema。
   }
 }
 

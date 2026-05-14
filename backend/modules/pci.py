@@ -7,30 +7,31 @@
 │  PCI计算器 (ASTM D6433标准)                                      │
 │     - 病害密度计算 → 扣除值(DV) → 修正扣除值(CDV) → PCI         │
 │     ↓                                                           │
-│  CDI计算器 (加权综合指数)                                        │
-│     - 结构性病害加权 → 综合退化指数 CDI                          │
+│  PCI预测模型 (基于已发表LTPP回归方程)                             │
+│     - 病害量汇总 → 气候分区选择 → 回归方程 → PCI估计             │
 │     ↓                                                           │
-│  性能预测模型 (报告中简化公式)                                    │
-│     ├─ 公式1: CDI预测 (基于AADTT交通量)                          │
-│     └─ 公式2: SAWI预警 (结构异常识别)                            │
+│  异常检测器 (标准化预测残差)                                      │
+│     - 实测PCI vs 预测PCI → z-score → 异常等级判定                │
 └─────────────────────────────────────────────────────────────────┘
 """
 
 """
-交通流量与路面病害建模分析 - 工程计算模块
+路面性能建模与分析系统
 Pavement Performance Modeling and Analysis System
 
-基于《交通量与路面病害建模分析》报告中的简化公式实现
+基于已发表文献的LTPP多元线性回归模型进行PCI预测与异常检测
 标准依据: ASTM D6433-23, FHWA LTPP Distress Manual
 
 功能:
-1. 病害物理参数 → PCI (Pavement Condition Index)
-2. PCI → CDI (Comprehensive Distress Index)  
-3. 公式1: CDI预测 (基于交通量预测路面退化)
-4. 公式2: SAWI结构异常预警指标 (识别隐蔽风险)
+1. 病害物理参数 → PCI (Pavement Condition Index)  [ASTM D6433]
+2. 病害量 + 路龄 → PCI估计  [Ali et al. 2023 回归方程]
+3. 病害前向投影 → 未来PCI预测
+4. 实测PCI vs 预测PCI → 标准化残差 → 异常等级判定
 
-作者: 工程计算模块
-版本: 1.0.0
+参考文献:
+- Ali A, Heneash U, Hussein A, et al. (2023). DOI: 10.22115/scce.2022.357135.1512
+
+版本: 2.0.0
 """
 
 import numpy as np
@@ -397,676 +398,493 @@ class PCICalculator:
 
 
 # ============================================================================
-# 第三部分: CDI计算器 (综合病害指数)
+# 第三部分: PCI预测模型 (基于已发表文献的回归方程)
+# ============================================================================
+#
+# 模型来源: Ali, A., Heneash, U., Hussein, A., et al. (2023).
+#   "Models Development for Asphalt Pavement Performance Index in Different
+#    Climate Regions Using Soft Computing Techniques"
+#   Journal of Soft Computing in Civil Engineering, 7(1), 20-42.
+#   DOI: 10.22115/scce.2022.357135.1512
+#
+# 模型形式: 多元线性回归 (MLR)，基于 LTPP 数据库 43 个柔性路面段、333 条观测
+#
+# 完整变量集 (10 个):
+#   X0=Age(年), X1=Rutting(mm), X2=FatigueCrack(m^2), X3=BlockCrack(m^2),
+#   X4=LongCrack(m^2), X5=TransCrack(m^2), X6=Patching(m^2), X7=Potholes(个),
+#   X8=Bleeding(m^2), X9=Ravelling(m^2)
+#
+# 注意: Ali et al. 原文中 BlockCrack/Patching/Potholes 在数据子集中均为零值，
+#       故最终回归方程未包含这些变量。本实现保留其接口，系数暂设为零。
 # ============================================================================
 
-class CDICalculator:
-    """
-    CDI (Comprehensive Distress Index) 计算器
-    
-    CDI是报告中提到的"路面病害综合指数"，与PCI概念类似但引入权重调整。
-    CDI更侧重于结构性病害的影响，反映路面的"结构健康度"。
-    
-    计算逻辑:
-    1. 根据病害类型赋予权重 (疲劳裂缝、车辙等结构性病害权重更高)
-    2. 根据严重程度赋予系数 (HIGH=1.5, MEDIUM=1.0, LOW=0.5)
-    3. 计算加权病害得分 = Σ(密度 × 权重 × 严重度系数)
-    4. CDI = PCI - 结构性惩罚项 (或 100 - 加权得分)
-    
-    权重设置依据:
-    - 疲劳裂缝: 1.5 (结构性，与重载直接相关)
-    - 车辙: 1.3 (结构性变形)
-    - 坑洞: 1.4 (安全+结构)
-    - 纵向/横向裂缝: 1.0/0.9
-    - 块状裂缝: 0.8 (温度主导)
-    - 其他功能性病害: 0.4-0.7
-    """
-    
-    def __init__(self):
-        # 病害权重 - 反映对结构性能的影响程度 (基于LTPP研究)
-        self.distress_weights = {
-            DistressType.FATIGUE_CRACKING: 1.5,    # 结构性病害，权重最高
-            DistressType.RUTTING: 1.3,              # 结构性变形
-            DistressType.POTHOLES: 1.4,             # 安全与结构并重
-            DistressType.LONGITUDINAL_CRACKING: 1.0,
-            DistressType.TRANSVERSE_CRACKING: 0.9,
-            DistressType.BLOCK_CRACKING: 0.8,       # 主要是温度裂缝
-            DistressType.EDGE_CRACKING: 0.9,
-            DistressType.PATCHING: 0.7,             # 维护痕迹
-            DistressType.BLEEDING: 0.4,             # 功能性问题
-            DistressType.RAVELING: 0.6              # 表面退化
-        }
-    
-    def calculate_weighted_distress_score(self, distresses: List[DistressMeasurement]) -> float:
-        """
-        计算加权病害得分 (0-100，越高表示病害越严重)
-        
-        Args:
-            distresses: 病害测量列表
-            
-        Returns:
-            加权病害得分
-        """
-        if not distresses:
-            return 0
-        
-        total_weighted_score = 0
-        total_weight = 0
-        
-        for distress in distresses:
-            density = distress.calculate_density()
-            weight = self.distress_weights.get(distress.distress_type, 1.0)
-            
-            # 严重程度系数
-            severity_factor = {
-                SeverityLevel.LOW: 0.5,
-                SeverityLevel.MEDIUM: 1.0,
-                SeverityLevel.HIGH: 1.5
-            }.get(distress.severity, 1.0)
-            
-            # 加权得分 = 密度 × 权重 × 严重程度系数
-            weighted_score = density * weight * severity_factor
-            total_weighted_score += weighted_score
-            total_weight += weight
-        
-        # 归一化到0-100范围 (假设最大合理加权密度为50)
-        max_reasonable_density = 50
-        normalized_score = min(100, (total_weighted_score / max_reasonable_density) * 100)
-        
-        return normalized_score
-    
-    def calculate_cdi_from_pci(self, pci: float, distresses: List[DistressMeasurement]) -> float:
-        """
-        基于PCI和病害组成计算CDI
-        
-        当存在高权重的结构性病害（如疲劳裂缝）时，CDI会比PCI更低（更差）。
-        
-        Args:
-            pci: PCI值 (0-100)
-            distresses: 病害列表
-            
-        Returns:
-            CDI值 (0-100，100为完好)
-        """
-        if not distresses:
-            return 100
-        
-        # 计算加权病害得分
-        weighted_score = self.calculate_weighted_distress_score(distresses)
-        
-        # 结构性惩罚项 (加权得分的10%)
-        structural_penalty = weighted_score * 0.1
-        
-        cdi = pci - structural_penalty
-        cdi = max(0, min(100, cdi))  # 限制在0-100
-        
-        return round(cdi, 1)
-    
-    def calculate_cdi_direct(self, distresses: List[DistressMeasurement]) -> float:
-        """
-        直接从病害参数计算CDI (不经过PCI)
-        
-        Args:
-            distresses: 病害测量列表
-            
-        Returns:
-            CDI值
-        """
-        weighted_score = self.calculate_weighted_distress_score(distresses)
-        cdi = 100 - weighted_score
-        return max(0, min(100, round(cdi, 1)))
 
-
-# ============================================================================
-# 第四部分: 报告中简化公式的实现
-# ============================================================================
-
-class PavementPerformanceModel:
+class PCIPredictionModel:
     """
-    路面性能预测模型 - 实现报告中的两个简化公式
-    
-    公式1: CDI预测公式 (基于交通量预测路面退化)
-    公式2: SAWI结构异常预警指标 (识别隐蔽风险)
-    
-    参数说明 (基于LTPP数据集校准):
-    - traffic_damage_coefficient (β_t): 0.12
-    - calibrated_degradation_rate (k_pci): 3.0
-    - climate_factor (β_c): 1.0 (中纬度湿润地区)
-    - structural_number_default: 4.5 (标准二级公路)
+    基于已发表 LTPP 回归方程的 PCI 预测模型
+
+    双气候分区支持:
+    - wet_freeze: 湿润冰冻区 (R^2=0.868, RMSE=7.195)
+    - wet_no_freeze: 湿润非冰冻区 (R^2=0.893, RMSE=7.324)
     """
-    
-    def __init__(self, section: PavementSection):
-        """
-        初始化模型
-        
-        Args:
-            section: 路面路段信息 (包含手动设置的交通常量)
-        """
-        self.section = section
-        
-        # 常量设定 (基于报告中"化简逻辑说明"和LTPP数据校准)
-        self.climate_factor = 1.0  # 气候修正系数 β_c
-        
-        # 材料参数 (典型沥青混凝土值)
-        self.asphalt_dynamic_modulus = 3000  # MPa @ 20°C
-        
-        # 结构数 (基于层厚和材料模量计算，默认4.5)
-        self.structural_number = self._calculate_structural_number()
-        
-        # 流量损伤系数 (基于LTPP数据校准)
-        self.traffic_damage_coefficient = 0.12  # β_t
-        
-        # SAWI公式中的校准常数 (基于LTPP数据校准)
-        self.calibrated_degradation_rate = 3.0  # k_pci
-        
-    def _calculate_structural_number(self) -> float:
-        """
-        计算结构数 (Structural Number, SN)
-        
-        基于AASHTO设计指南:
-        SN = a1×D1 + a2×D2×m2 + a3×D3×m3
-        
-        其中:
-        - a1: 沥青层系数 (≈0.44/inch)
-        - D1: 沥青层厚度 (inch)
-        - a2: 基层系数 (≈0.14/inch)
-        - m2: 基层排水系数 (默认1.0)
-        
-        Returns:
-            结构数 (无量纲)
-        """
-        # 转换为英寸 (1m = 39.37 inch)
-        asphalt_thickness_inch = self.section.asphalt_thickness * 39.37
-        base_thickness_inch = self.section.base_thickness * 39.37
-        
-        # 层系数 (典型值)
-        a1 = 0.44  # 沥青层
-        a2 = 0.14  # 粒料基层
-        m2 = 1.0   # 排水系数
-        
-        sn = a1 * asphalt_thickness_inch + a2 * base_thickness_inch * m2
-        
-        # 如果计算值偏离合理范围，使用默认值4.5
-        if sn < 3.0 or sn > 6.0:
-            return 4.5
-        return sn
-    
-    def formula_1_predict_cdi(
-        self, 
-        current_cdi: float, 
-        prediction_years: float,
-        custom_aadtt: Optional[float] = None
+
+    # 回归系数 (Ali et al., 2023, Eq.15 & Eq.16)
+    COEFFICIENTS = {
+        "wet_freeze": {
+            "const": 116.52,
+            "age": -2.74,
+            "rutting": 0.178,
+            "fatigue_cracking": -0.018,
+            "block_cracking": 0.0,
+            "longitudinal_cracking": 0.004,
+            "transverse_cracking": 0.024,
+            "patching": 0.0,
+            "potholes": 0.0,
+            "bleeding": 0.010,
+            "raveling": 0.008,
+            "rmse": 7.195,
+            "r_squared": 0.868,
+        },
+        "wet_no_freeze": {
+            "const": 113.33,
+            "age": -3.078,
+            "rutting": 0.205,
+            "fatigue_cracking": 0.007,
+            "block_cracking": 0.0,
+            "longitudinal_cracking": -0.004,
+            "transverse_cracking": 0.045,
+            "patching": 0.0,
+            "potholes": 0.0,
+            "bleeding": 0.0,
+            "raveling": 0.0,
+            "rmse": 7.324,
+            "r_squared": 0.893,
+        },
+    }
+
+    # 病害变量单位说明
+    VARIABLE_UNITS = {
+        "age": "年",
+        "rutting": "mm",
+        "fatigue_cracking": "m^2",
+        "block_cracking": "m^2",
+        "longitudinal_cracking": "m^2",
+        "transverse_cracking": "m^2",
+        "patching": "m^2",
+        "potholes": "个",
+        "bleeding": "m^2",
+        "raveling": "m^2",
+    }
+
+    # HDM-4 参考劣化率 (年增长率，用于病害量前向投影)
+    # 来源: Morosiuk, Riley & Odoki, HDM-4 Volume 6, PIARC/World Bank, 2004
+    DEFAULT_DETERIORATION_RATES = {
+        "rutting": 0.15,
+        "fatigue_cracking": 0.08,
+        "block_cracking": 0.03,
+        "longitudinal_cracking": 0.05,
+        "transverse_cracking": 0.05,
+        "patching": 0.04,
+        "potholes": 0.06,
+        "bleeding": 0.02,
+        "raveling": 0.03,
+    }
+
+    def __init__(self, climate_zone: str = "wet_no_freeze"):
+        if climate_zone not in self.COEFFICIENTS:
+            raise ValueError(
+                f"不支持的气候分区: {climate_zone}，"
+                f"可选: {list(self.COEFFICIENTS.keys())}"
+            )
+        self.climate_zone = climate_zone
+        self.coef = self.COEFFICIENTS[climate_zone]
+
+    def predict_current(
+        self,
+        age: float,
+        distress_values: Dict[str, float],
     ) -> float:
         """
-        公式1: CDI预测公式
-        
-        根据已知交通量预测路面的总体退化程度，用于制定维护计划。
-        
-        数学模型:
-        CDI_future = CDI_current - ΔCDI
-        
-        其中退化量:
-        ΔCDI = β_t × AADTT^1.2 × Δt / SN^0.5 × β_c
-        
-        参数:
-        - CDI_current: 当前CDI值 (0-100)
-        - AADTT: 年平均日货车流量 (千辆/日) [手动设置常量]
-        - Δt: 预测时间跨度 (年)
-        - SN: 结构数 (基于层厚计算)
-        - β_t: 流量损伤系数 (0.12)
-        - β_c: 气候修正系数 (1.0)
-        
-        物理意义:
-        该公式体现了交通荷载对路面的累积损伤效应，符合Miner疲劳准则。
-        指数1.2反映重载车辆的非线性破坏效应 (接近四次方定律但更为保守)。
-        SN^0.5反映结构强度对损伤的抵抗能力。
-        
+        将当前路龄和病害量代入回归方程，计算 PCI 估计值。
+
         Args:
-            current_cdi: 当前CDI值 (0-100)
-            prediction_years: 预测时间跨度 (年)
-            custom_aadtt: 自定义AADTT值，如不指定则使用路段默认值
-            
+            age: 路龄 (年)
+            distress_values: 病害测量值字典，
+                key 为变量名 (如 "rutting")，value 为数值 (物理单位)
+
         Returns:
-            预测的CDI值
+            PCI 估计值 (0-100)
         """
-        # 使用手动设置的AADTT常量 (或自定义值)
-        aadtt = custom_aadtt if custom_aadtt is not None else self.section.aadtt
-        
-        # 参数验证
-        if aadtt <= 0:
-            raise ValueError("AADTT必须大于0")
-        if prediction_years < 0:
-            raise ValueError("预测时间跨度不能为负")
-        if current_cdi < 0 or current_cdi > 100:
-            raise ValueError("CDI必须在0-100范围内")
-        
-        # 计算退化量
-        # ΔCDI = β_t × AADTT^1.2 × Δt / SN^0.5 × β_c
-        degradation = (
-            self.traffic_damage_coefficient * 
-            (aadtt ** 1.2) * 
-            prediction_years / 
-            (self.structural_number ** 0.5) * 
-            self.climate_factor
-        )
-        
-        # 预测CDI
-        predicted_cdi = current_cdi - degradation
-        
-        # 限制在合理范围 (0-100)
-        predicted_cdi = max(0, min(100, predicted_cdi))
-        
-        return round(predicted_cdi, 2)
-    
-    def formula_2_sawi(
-        self, 
-        observed_pci_drop: float, 
-        time_period: float,
-        custom_aadtt: Optional[float] = None
+        pci = self.coef["const"]
+        pci += self.coef["age"] * age
+
+        for var_name in [
+            "rutting", "fatigue_cracking", "block_cracking",
+            "longitudinal_cracking", "transverse_cracking",
+            "patching", "potholes", "bleeding", "raveling",
+        ]:
+            value = distress_values.get(var_name, 0.0)
+            pci += self.coef[var_name] * value
+
+        return max(0.0, min(100.0, pci))
+
+    def predict_future(
+        self,
+        current_age: float,
+        prediction_years: float,
+        distress_values: Dict[str, float],
+        traffic_growth_rate: float = 0.02,
+    ) -> float:
+        """
+        预测未来 PCI。
+
+        假设各病变量按参考劣化率增长:
+          distress_future = distress_current * (1 + r * dt * (1 + g))
+        其中 r 为病变量基础劣化率，g 为交通增长率修正因子。
+
+        Args:
+            current_age: 当前路龄 (年)
+            prediction_years: 预测年限
+            distress_values: 当前病害测量值
+            traffic_growth_rate: 交通年增长率
+
+        Returns:
+            未来 PCI 预测值
+        """
+        future_age = current_age + prediction_years
+        future_distress = {}
+
+        for var_name, current_value in distress_values.items():
+            if var_name == "age":
+                continue
+            base_rate = self.DEFAULT_DETERIORATION_RATES.get(var_name, 0.05)
+            growth = base_rate * prediction_years * (1.0 + traffic_growth_rate)
+            future_distress[var_name] = current_value * (1.0 + growth)
+
+        return self.predict_current(future_age, future_distress)
+
+    def get_rmse(self) -> float:
+        """返回模型标准误 (RMSE)，用于残差标准化。"""
+        return self.coef["rmse"]
+
+    def get_r_squared(self) -> float:
+        """返回模型 R^2。"""
+        return self.coef["r_squared"]
+
+
+# ============================================================================
+# 第四部分: 异常检测器
+# ============================================================================
+#
+# 原理:
+# 若路面结构健康，实测 PCI (ASTM D6433) 应大致服从回归模型的预测分布。
+# 残差 r = PCI_measured - PCI_predicted 揭示了实测退化中无法被回归模型
+# 解释的额外部分。标准化残差 |z| 过大时，提示存在额外驱动力——在城市
+# 道路环境下最可能指向地下空洞、路基疏松或排水失效等结构性缺陷。
+#
+# 参考:
+# - Luo et al. (2023), 深圳 315 起道路塌陷事件的易发性制图研究
+# - 首尔市空洞研究 (2020), 裂缝深度/空洞尺寸关联的多级风险判定
+# ============================================================================
+
+
+class AnomalyDetector:
+    """
+    基于标准化预测残差的路面异常检测器
+
+    将实测 PCI (ASTM D6433) 与模型预测 PCI (回归方程) 的偏差标准化，
+    输出异常等级判定。
+    """
+
+    def __init__(self, model_rmse: float = 7.2):
+        """
+        Args:
+            model_rmse: 回归模型的标准误 (RMSE)，用作残差标准化的分母。
+                默认 7.2，来源于 Ali et al. (2023) 模型 RMSE 的保守取值。
+        """
+        self.sigma_model = model_rmse
+
+    def analyze(
+        self,
+        measured_pci: float,
+        predicted_pci: float,
     ) -> Dict:
         """
-        公式2: 结构异常预警指标 (SAWI - Structural Anomaly Warning Index)
-        
-        通过对比实测病害发展与理论预期，识别是否存在塌陷、排水失效等隐蔽风险。
-        
-        数学模型:
-        SAWI = ΔPCI_observed / (k_pci × AADTT × Δt)
-        
-        参数:
-        - ΔPCI_observed: 观测周期内PCI的实测下降值 (正值表示恶化)
-        - k_pci: 校准后的荷载退化率常数 (3.0)
-        - AADTT: 年平均日货车流量 (千辆/日) [手动设置常量]
-        - Δt: 观测时间跨度 (年)
-        
-        判定标准:
-        - SAWI ≤ 1.0: NORMAL (正常)
-          病害发展符合流量预期，属于正常磨损。建议继续常规监测。
-          
-        - 1.0 < SAWI ≤ 1.5: WARNING (警告)  
-          病害超前发展，预示存在隐蔽风险 (如基层含水量过高、排水失效)。
-          建议增加监测频率，进行FWD弯沉检测。
-          
-        - SAWI > 1.5: CRITICAL (危急)
-          存在极高风险，可能存在地基塌陷、深层脱空等严重隐患。
-          建议立即封路或限制通行，进行深层雷达扫描(GPR)和钻芯验证。
-        
-        工程原理:
-        当实测退化速率显著高于基于交通量的理论预期时，表明存在未纳入模型的
-        外在诱因。这些诱因通常与隐蔽的结构问题相关。
-        
+        计算标准化残差并判定异常等级。
+
         Args:
-            observed_pci_drop: 观测周期内PCI实测下降值 (正值表示恶化)
-            time_period: 观测时间跨度 (年)
-            custom_aadtt: 自定义AADTT值
-            
+            measured_pci: ASTM D6433 标准计算得到的实测 PCI
+            predicted_pci: 回归模型估计的 PCI
+
         Returns:
-            包含SAWI值、风险等级和建议措施的字典
+            包含 z_score、anomaly_level、description 等的字典
         """
-        # 使用手动设置的AADTT常量
-        aadtt = custom_aadtt if custom_aadtt is not None else self.section.aadtt
-        
-        # 参数验证
-        if aadtt <= 0:
-            raise ValueError("AADTT必须大于0")
-        if time_period <= 0:
-            raise ValueError("观测时间跨度必须大于0")
-        if observed_pci_drop < 0:
-            warnings.warn("PCI下降值为负，表示路面状况改善，可能是维护干预的结果")
-        
-        # 计算预期的PCI下降 (基于正常磨损模型)
-        # 预期下降 = k_pci × AADTT × Δt
-        expected_pci_drop = self.calibrated_degradation_rate * aadtt * time_period
-        
-        # 计算SAWI
-        if expected_pci_drop == 0:
-            sawi = float('inf') if observed_pci_drop > 0 else 0
+        residual = float(measured_pci) - float(predicted_pci)
+        z_score = residual / self.sigma_model if self.sigma_model > 0 else 0.0
+
+        abs_z = abs(z_score)
+        if abs_z <= 1.0:
+            level = "NORMAL"
+            description = "实测退化符合模型预期，属正常磨损范围"
+        elif abs_z <= 2.0:
+            level = "WARNING"
+            description = "实测退化略快于预期，建议增加监测频率"
         else:
-            sawi = observed_pci_drop / expected_pci_drop
-        
-        # 风险评估
-        risk_assessment = self._assess_risk(sawi)
-        
+            level = "CRITICAL"
+            description = "实测退化显著超出模型预期，可能指向地下结构性缺陷"
+
+        if residual > 0:
+            direction_note = "实测 PCI 高于模型预测 (路面状况好于预期)"
+        else:
+            direction_note = "实测 PCI 低于模型预测 (退化快于预期，重点关注)"
+
         return {
-            'sawi': round(sawi, 3),
-            'observed_pci_drop': round(observed_pci_drop, 2),
-            'expected_pci_drop': round(expected_pci_drop, 2),
-            'risk_level': risk_assessment['level'],
-            'risk_description': risk_assessment['description'],
-            'recommended_action': risk_assessment['action']
+            "z_score": round(z_score, 3),
+            "residual": round(residual, 2),
+            "anomaly_level": level,
+            "description": description,
+            "direction_note": direction_note,
+            "sigma_model": self.sigma_model,
         }
-    
-    def _assess_risk(self, sawi: float) -> Dict:
-        """
-        基于SAWI值进行风险评估
-        
-        Args:
-            sawi: 结构异常预警指标值
-            
-        Returns:
-            风险评估字典 (包含等级、描述和建议)
-        """
-        if sawi <= 1.0:
-            return {
-                'level': 'NORMAL',
-                'description': '病害发展符合流量预期，属于正常磨损',
-                'action': '继续常规监测，按计划维护'
-            }
-        elif sawi <= 1.5:
-            return {
-                'level': 'WARNING',
-                'description': '病害超前发展，可能存在隐蔽风险（排水失效、基层弱化）',
-                'action': '增加监测频率，进行FWD弯沉检测，排查潜在隐患'
-            }
-        else:
-            return {
-                'level': 'CRITICAL',
-                'description': '存在极高风险，可能存在地基塌陷、深层脱空等严重隐患',
-                'action': '立即封路或限制通行，进行深层雷达扫描(GPR)和钻芯验证'
-            }
 
 
 # ============================================================================
 # 第五部分: 端到端分析引擎
 # ============================================================================
 
+
 class PavementAnalysisEngine:
     """
     路面分析引擎 - 完整的端到端计算流程封装
-    
-    提供一键式分析功能，整合PCI计算、CDI计算、性能预测和风险预警。
-    
+
+    整合 PCI 计算 (ASTM D6433)、PCI 预测 (回归模型) 和异常检测 (标准化残差)。
+
     使用示例:
     ```python
-    # 初始化引擎
-    engine = PavementAnalysisEngine()
-    
-    # 定义路段 (设置交通常量)
-    section = PavementSection(
-        section_id="SEC001",
-        length=1000,
-        width=7,
-        aadtt=2.5  # 手动设置交通量
-    )
-    
-    # 定义病害数据 (用户提供)
-    distresses = [
-        DistressMeasurement(DistressType.FATIGUE_CRACKING, SeverityLevel.HIGH, 40, 'area'),
-        DistressMeasurement(DistressType.RUTTING, SeverityLevel.MEDIUM, 20, 'area'),
-    ]
-    
-    # 执行完整分析
-    results = engine.analyze(
-        section=section,
-        distresses=distresses,
-        prediction_years=5,
-        historical_pci=85,      # 历史数据 (用于SAWI)
-        historical_years_ago=2   # 历史数据距今2年
-    )
+    engine = PavementAnalysisEngine(climate_zone="wet_no_freeze")
+    section = PavementSection(section_id="SEC001", length=1000, width=7)
+    distresses = [...]
+    results = engine.analyze(section=section, distresses=distresses)
     ```
     """
-    
-    def __init__(self):
+
+    def __init__(self, climate_zone: str = "wet_no_freeze"):
         self.pci_calculator = PCICalculator()
-        self.cdi_calculator = CDICalculator()
-    
+        self.predictor = PCIPredictionModel(climate_zone=climate_zone)
+        self.detector = AnomalyDetector(model_rmse=self.predictor.get_rmse())
+        self.climate_zone = climate_zone
+
     def analyze(
-        self, 
-        section: PavementSection, 
+        self,
+        section: PavementSection,
         distresses: List[DistressMeasurement],
         prediction_years: float = 5.0,
-        historical_pci: Optional[float] = None,
-        historical_years_ago: Optional[float] = None
+        user_distress_defaults: Optional[Dict[str, float]] = None,
     ) -> Dict:
         """
-        执行完整的路面分析流程
-        
+        执行完整的路面分析流程。
+
         Args:
-            section: 路段信息 (包含手动设置的交通常量)
+            section: 路段信息
             distresses: 当前病害测量列表
-            prediction_years: 预测年限 (用于公式1)
-            historical_pci: 历史PCI值 (用于公式2 SAWI计算)
-            historical_years_ago: 历史数据距今多少年
-            
+            prediction_years: 预测年限
+            user_distress_defaults: 用户手动设定的病害默认值，
+                用于补充 YOLO 未检测的病害类型
+
         Returns:
-            完整的分析结果字典，包含:
-            - input_parameters: 输入参数汇总
-            - current_condition: 当前状况 (PCI, CDI, 等级)
-            - prediction: 性能预测结果 (公式1)
-            - risk_assessment: 风险预警结果 (公式2)
+            完整的分析结果字典
         """
-        results = {
-            'section_id': section.section_id,
-            'input_parameters': {},
-            'current_condition': {},
-            'prediction': {},
-            'risk_assessment': {}
-        }
-        
-        # 1. 记录输入参数 (用于追溯)
-        results['input_parameters'] = {
-            'section_length_m': section.length,
-            'section_width_m': section.width,
-            'surface_type': section.surface_type,
-            'aadtt_k_vehicles_per_day': section.aadtt,  # 手动设置的常量
-            'structural_number': self._estimate_structural_number(section),
-            'traffic_growth_rate': section.traffic_growth_rate,
-            'distress_summary': self._summarize_distresses(distresses)
-        }
-        
-        # 2. 计算当前状况 (PCI & CDI)
+        current_year = max(section.construction_year, section.last_maintenance_year)
+        import datetime
+        age = float(datetime.datetime.now().year - current_year)
+        if age < 0:
+            age = 0.0
+
+        # 1. 当前 PCI (ASTM D6433 标准)
         current_pci = self.pci_calculator.calculate_pci(distresses)
-        current_cdi = self.cdi_calculator.calculate_cdi_from_pci(current_pci, distresses)
-        
-        results['current_condition'] = {
-            'pci': current_pci,
-            'cdi': current_cdi,
-            'condition_rating': self._get_condition_rating(current_pci),
-            'distress_count': len(distresses)
-        }
-        
-        # 3. 性能预测 (公式1)
-        model = PavementPerformanceModel(section)
-        predicted_cdi = model.formula_1_predict_cdi(
-            current_cdi, 
-            prediction_years
+
+        # 2. 汇总病害量 (用于回归模型输入)
+        distress_values = self._aggregate_distress_values(distresses)
+        if user_distress_defaults:
+            for k, v in user_distress_defaults.items():
+                if k not in distress_values or distress_values[k] == 0:
+                    distress_values[k] = float(v)
+
+        # 3. 当前 PCI 估计值 (回归模型)
+        current_pci_estimated = self.predictor.predict_current(age, distress_values)
+
+        # 4. 未来 PCI 预测
+        growth = getattr(section, "traffic_growth_rate", 0.02)
+        predicted_pci = self.predictor.predict_future(
+            age, prediction_years, distress_values, traffic_growth_rate=growth
         )
-        
-        results['prediction'] = {
-            'prediction_years': prediction_years,
-            'predicted_cdi': predicted_cdi,
-            'predicted_pci': predicted_cdi,  # 简化假设PCI≈CDI
-            'degradation_rate_per_year': (current_cdi - predicted_cdi) / prediction_years,
-            'maintenance_triggered': predicted_cdi < 70  # PCI<70需要预防性维护
+
+        # 5. 异常检测 (基于当前实测 PCI vs 回归模型估计)
+        anomaly = self.detector.analyze(current_pci, current_pci_estimated)
+
+        return {
+            "section_id": section.section_id,
+            "input_parameters": {
+                "climate_zone": self.climate_zone,
+                "model_r_squared": self.predictor.get_r_squared(),
+                "model_rmse": self.predictor.get_rmse(),
+                "age_years": round(age, 1),
+                "section_length_m": section.length,
+                "section_width_m": section.width,
+                "surface_type": section.surface_type,
+                "aadtt_k_per_day": section.aadtt,
+                "traffic_growth_rate": growth,
+                "distress_values": distress_values,
+                "distress_count": len(distresses),
+            },
+            "current_pci": round(float(current_pci), 2),
+            "current_pci_estimated": round(float(current_pci_estimated), 2),
+            "predicted_pci": round(float(predicted_pci), 2),
+            "prediction_years": prediction_years,
+            "condition_rating": self._get_condition_rating(current_pci),
+            "anomaly": anomaly,
         }
-        
-        # 4. 风险识别 (公式2 SAWI)
-        if historical_pci is not None and historical_years_ago is not None:
-            observed_drop = historical_pci - current_pci
-            sawi_result = model.formula_2_sawi(observed_drop, historical_years_ago)
-            results['risk_assessment'] = sawi_result
-        else:
-            results['risk_assessment'] = {
-                'note': '未提供历史数据，无法计算SAWI指标',
-                'recommendation': '建议收集历史检测数据以启用结构异常检测功能'
-            }
-        
-        return results
-    
-    def _estimate_structural_number(self, section: PavementSection) -> float:
-        """估算结构数"""
-        model = PavementPerformanceModel(section)
-        return model.structural_number
-    
-    def _summarize_distresses(self, distresses: List[DistressMeasurement]) -> Dict:
-        """汇总病害统计信息"""
-        summary = {}
+
+    def _aggregate_distress_values(
+        self, distresses: List[DistressMeasurement]
+    ) -> Dict[str, float]:
+        """
+        将 DistressMeasurement 列表汇总为回归模型所需的变量字典。
+
+        对于面积类病害: 直接累加物理面积 (m^2)
+        对于长度类病害: 累加长度 (m)，再按假设宽度 0.5m 转换为面积
+        对于计数类病害: 累加个数
+        """
+        TYPE_TO_VAR = {
+            "rutting": "rutting",
+            "fatigue_cracking": "fatigue_cracking",
+            "block_cracking": "block_cracking",
+            "longitudinal_cracking": "longitudinal_cracking",
+            "transverse_cracking": "transverse_cracking",
+            "edge_cracking": "transverse_cracking",  # 近似映射
+            "patching": "patching",
+            "potholes": "potholes",
+            "bleeding": "bleeding",
+            "raveling": "raveling",
+        }
+
+        values: Dict[str, float] = {
+            "rutting": 0.0, "fatigue_cracking": 0.0, "block_cracking": 0.0,
+            "longitudinal_cracking": 0.0, "transverse_cracking": 0.0,
+            "patching": 0.0, "potholes": 0.0, "bleeding": 0.0, "raveling": 0.0,
+        }
+
         for d in distresses:
-            key = f"{d.distress_type.value}_{d.severity.value}"
-            if key not in summary:
-                summary[key] = {'count': 0, 'total_quantity': 0}
-            summary[key]['count'] += 1
-            summary[key]['total_quantity'] += d.quantity
-        return summary
-    
+            var_name = TYPE_TO_VAR.get(d.distress_type.value)
+            if var_name is None:
+                continue
+            if d.unit == "count":
+                values[var_name] += d.quantity
+            elif d.unit == "length":
+                values[var_name] += d.quantity * 0.5
+            else:
+                values[var_name] += d.quantity
+
+        return values
+
     def _get_condition_rating(self, pci: float) -> str:
-        """
-        根据PCI获取状况等级 (ASTM D6433标准)
-        
-        等级划分:
-        86-100: Good (良好) - 仅需常规监测
-        71-85:  Satisfactory (满意) - 预防性维护
-        56-70:  Fair (一般) - 小修
-        41-55:  Poor (较差) - 大修或罩面
-        26-40:  Very Poor (很差) - 结构重建
-        11-25:  Serious (严重) - 需要重建
-        0-10:   Failed (完全损坏) - 立即重建
-        """
+        """根据 PCI 获取状况等级 (ASTM D6433 标准)"""
         if pci >= 86:
-            return "Good (良好) - 仅需常规监测"
+            return "Good (良好)"
         elif pci >= 71:
-            return "Satisfactory (满意) - 预防性维护"
+            return "Satisfactory (满意)"
         elif pci >= 56:
-            return "Fair (一般) - 小修"
+            return "Fair (一般)"
         elif pci >= 41:
-            return "Poor (较差) - 大修或罩面"
+            return "Poor (较差)"
         elif pci >= 26:
-            return "Very Poor (很差) - 结构重建"
+            return "Very Poor (很差)"
         elif pci >= 11:
-            return "Serious (严重) - 需要重建"
+            return "Serious (严重)"
         else:
-            return "Failed (完全损坏) - 立即重建"
+            return "Failed (完全损坏)"
 
 
 # ============================================================================
 # 第六部分: 使用示例
 # ============================================================================
 
+
 def run_complete_example():
     """
-    完整使用示例 - 展示从病害参数输入到预警输出的全流程
+    完整使用示例 - 展示从病害参数输入到异常检测输出的全流程
     """
     print("=" * 80)
     print("路面性能分析系统 - 完整使用示例")
     print("=" * 80)
-    
+
     # 步骤1: 定义路段信息
-    # 关键：AADTT等交通参数是手动设置的常量
     section = PavementSection(
-        section_id="G104_K235+500",  # 路段桩号
-        length=1000,                  # 路段长度 1km
-        width=7.5,                    # 路段宽度 7.5m (双向两车道)
-        surface_type="AC",            # 沥青混凝土路面
-        construction_year=2018,       # 建成年份
-        aadtt=3.2,                    # 【手动设置】日均3200辆货车 (典型国省道)
-        traffic_growth_rate=0.03,     # 交通年增长率 3%
-        asphalt_thickness=0.16,       # 沥青层厚度 16cm
-        base_thickness=0.35           # 基层厚度 35cm
+        section_id="G104_K235+500",
+        length=1000,
+        width=7.5,
+        surface_type="AC",
+        construction_year=2018,
+        aadtt=3.2,
+        traffic_growth_rate=0.03,
+        asphalt_thickness=0.16,
+        base_thickness=0.35,
     )
-    
+
     print(f"\n【步骤1】定义路段信息")
     print(f"  路段ID: {section.section_id}")
-    print(f"  几何尺寸: {section.length}m × {section.width}m")
-    print(f"  【手动设置】AADTT: {section.aadtt} 千辆/日")
-    print(f"  【手动设置】交通增长率: {section.traffic_growth_rate*100:.0f}%/年")
-    
-    # 步骤2: 输入病害测量数据
-    # 这是用户实际检测得到的物理参数
+    print(f"  几何尺寸: {section.length}m x {section.width}m")
+    print(f"  AADTT: {section.aadtt} 千辆/日")
+
+    # 步骤2: 定义病害数据 (当前 YOLO 检测的 3 类)
     distresses = [
-        # 疲劳裂缝 (重度): 轮迹带龟裂，面积35m²
         DistressMeasurement(
-            distress_type=DistressType.FATIGUE_CRACKING,
-            severity=SeverityLevel.HIGH,
-            quantity=35,           # 测量面积: 35平方米
-            unit='area',
-            sample_unit_area=232   # ASTM标准样本单元面积
+            DistressType.LONGITUDINAL_CRACKING,
+            SeverityLevel.MEDIUM,
+            25.0, unit="length", sample_unit_area=7500.0
         ),
-        # 车辙 (中度): 深度10-15mm，影响面积20m²
         DistressMeasurement(
-            distress_type=DistressType.RUTTING,
-            severity=SeverityLevel.MEDIUM,
-            quantity=20,
-            unit='area',
-            sample_unit_area=232
+            DistressType.POTHOLES,
+            SeverityLevel.HIGH,
+            3.0, unit="count", sample_unit_area=7500.0
         ),
-        # 纵向裂缝 (中度): 轮迹带纵向裂缝，长度120m
         DistressMeasurement(
-            distress_type=DistressType.LONGITUDINAL_CRACKING,
-            severity=SeverityLevel.MEDIUM,
-            quantity=120,          # 测量长度: 120米
-            unit='length',
-            sample_unit_area=232
+            DistressType.PATCHING,
+            SeverityLevel.LOW,
+            5.0, unit="area", sample_unit_area=7500.0
         ),
-        # 坑洞 (轻度): 2个，直径约0.3m
-        DistressMeasurement(
-            distress_type=DistressType.POTHOLES,
-            severity=SeverityLevel.LOW,
-            quantity=2,            # 测量数量: 2个
-            unit='count',
-            sample_unit_area=232
-        ),
-        # 块状裂缝 (轻度): 温度裂缝，面积15m²
-        DistressMeasurement(
-            distress_type=DistressType.BLOCK_CRACKING,
-            severity=SeverityLevel.LOW,
-            quantity=15,
-            unit='area',
-            sample_unit_area=232
-        )
     ]
-    
-    print(f"\n【步骤2】输入病害测量数据")
-    print(f"  样本单元面积: 232 m² (ASTM D6433标准)")
-    for d in distresses:
-        unit_str = {'area': 'm²', 'length': 'm', 'count': '个'}.get(d.unit, d.unit)
-        print(f"  - {d.distress_type.value}: {d.quantity} {unit_str} ({d.severity.value})")
-    
-    # 步骤3: 执行完整分析
-    engine = PavementAnalysisEngine()
-    
-    # 假设1年前PCI为82 (用于SAWI计算)
+
+    print(f"\n【步骤2】定义病害数据: {len(distresses)} 条 (当前 YOLO 检测类型)")
+
+    # 步骤3: 执行分析 (YOLO 未检测的病害类型以默认值补充)
+    engine = PavementAnalysisEngine(climate_zone="wet_no_freeze")
     results = engine.analyze(
         section=section,
         distresses=distresses,
-        prediction_years=5,           # 预测未来5年
-        historical_pci=82,            # 1年前检测PCI为82
-        historical_years_ago=1        # 历史数据距今1年
+        prediction_years=5.0,
+        user_distress_defaults={
+            "rutting": 2.0,           # 默认车辙 2mm
+            "fatigue_cracking": 0.0,  # YOLO 未训练，暂设 0
+            "transverse_cracking": 0.0,
+            "bleeding": 0.0,
+            "raveling": 0.0,
+        },
     )
-    
-    # 步骤4: 输出结果
-    print(f"\n【步骤3】分析结果")
-    print("-" * 80)
-    
-    print(f"\n1. 当前状况评估:")
-    print(f"   PCI (路面状况指数) = {results['current_condition']['pci']}")
-    print(f"   CDI (综合病害指数) = {results['current_condition']['cdi']}")
-    print(f"   状况等级: {results['current_condition']['condition_rating']}")
-    
-    print(f"\n2. 性能预测 (公式1 - CDI预测):")
-    pred = results['prediction']
-    print(f"   预测年限: {pred['prediction_years']} 年")
-    print(f"   预测CDI: {pred['predicted_cdi']}")
-    print(f"   年均退化速率: {pred['degradation_rate_per_year']:.2f} 点/年")
-    print(f"   维护预警: {'是' if pred['maintenance_triggered'] else '否'} "
-          f"(PCI<70触发)")
-    
-    print(f"\n3. 结构异常预警 (公式2 - SAWI):")
-    risk = results['risk_assessment']
-    if 'sawi' in risk:
-        print(f"   SAWI指标: {risk['sawi']}")
-        print(f"   实测PCI下降: {risk['observed_pci_drop']}")
-        print(f"   预期PCI下降: {risk['expected_pci_drop']}")
-        print(f"   风险等级: {risk['risk_level']}")
-        print(f"   风险描述: {risk['risk_description']}")
-        print(f"   建议措施: {risk['recommended_action']}")
-    else:
-        print(f"   {risk['note']}")
-    
-    print("\n" + "=" * 80)
-    
-    return results
+
+    print(f"\n【步骤3】分析结果:")
+    print(f"  当前 PCI (ASTM D6433): {results['current_pci']}")
+    print(f"  当前 PCI (回归估计):  {results['current_pci_estimated']}")
+    print(f"  预测 PCI ({results['prediction_years']}年后): {results['predicted_pci']}")
+    print(f"  状况等级: {results['condition_rating']}")
+    print(f"  异常检测:")
+    anomaly = results['anomaly']
+    print(f"    z-score: {anomaly['z_score']}")
+    print(f"    等级:    {anomaly['anomaly_level']}")
+    print(f"    说明:    {anomaly['description']}")
+    print(f"    {anomaly['direction_note']}")
+    print("=" * 80)
 
 
-# 主程序入口
 if __name__ == "__main__":
-    # 运行完整示例
-    results = run_complete_example()
+    run_complete_example()

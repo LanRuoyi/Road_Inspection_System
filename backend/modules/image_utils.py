@@ -4,10 +4,18 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 TYPE_COLOR_MAP = {
-    "crack": (40, 60, 230),
-    "pothole": (10, 150, 250),
-    "subsidence": (50, 180, 60),
-    "repair": (180, 90, 200),
+    # road.list 实际检测类别
+    "fatigue_cracking": (40, 60, 230),
+    "potholes": (10, 150, 250),
+    "patching": (180, 90, 200),
+    # 扩展类别（YOLO模型后续扩展时可使用）
+    "longitudinal_cracking": (0, 50, 200),
+    "transverse_cracking": (200, 100, 50),
+    "rutting": (0, 180, 100),
+    "block_cracking": (150, 50, 150),
+    "edge_cracking": (100, 50, 100),
+    "bleeding": (50, 150, 200),
+    "raveling": (80, 80, 80),
     "unknown": (120, 120, 120),
 }
 

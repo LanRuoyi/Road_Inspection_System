@@ -618,6 +618,8 @@ const switchMapLayer = (type) => {
     currentLayer = L.tileLayer(url, {
       subdomains: mapConfig.subdomains || [],
       attribution: mapConfig.attribution || '&copy; <a href="https://www.amap.com/">高德地图</a>',
+      maxNativeZoom: 18,
+      maxZoom: 22,
     });
 
     // 添加到地图
@@ -652,7 +654,8 @@ const initMap = () => {
     map = L.map('map', {
       center: [currentLat.value, currentLng.value],
       zoom: getInitialView(props.initialView)?.zoom || 13,
-      zoomControl: false
+      zoomControl: false,
+      maxZoom: 22
     })
 
     // 使用后端配置初始化底图图层

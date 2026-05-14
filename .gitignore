@@ -58,3 +58,5 @@ backend/data/upload_tmp/
 # Build artifacts
 *.egg-info/
 dist/
+
+Thesis/

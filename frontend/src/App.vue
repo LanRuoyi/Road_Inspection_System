@@ -253,12 +253,13 @@ const handleAnalysisPreviewInstance = (payload) => {
 const handleSettingsSaved = (settings) => {
   const source = settings && typeof settings === 'object' ? settings : {}
   settingsVersion.value += 1
+  // instance_defaults/thresholds/status_colors 全部替换（不用 spread-merge），
+  // 避免旧 key 在 settings.py 更新后仍然残留。
   analysisConfig.value = {
     ...analysisConfig.value,
-    instance_defaults: {
-      ...analysisConfig.value.instance_defaults,
-      ...(source.analysis_instance_defaults || {})
-    },
+    instance_defaults: source.analysis_instance_defaults && typeof source.analysis_instance_defaults === 'object'
+      ? { ...source.analysis_instance_defaults }
+      : analysisConfig.value.instance_defaults,
     param_schema: Array.isArray(source.analysis_param_schema)
       ? source.analysis_param_schema
       : analysisConfig.value.param_schema,
@@ -266,10 +267,10 @@ const handleSettingsSaved = (settings) => {
       ? source.analysis_result_schema
       : analysisConfig.value.result_schema,
     thresholds: source.analysis_thresholds && typeof source.analysis_thresholds === 'object'
-      ? source.analysis_thresholds
+      ? { ...source.analysis_thresholds }
       : analysisConfig.value.thresholds,
     status_colors: source.analysis_status_colors && typeof source.analysis_status_colors === 'object'
-      ? source.analysis_status_colors
+      ? { ...source.analysis_status_colors }
       : analysisConfig.value.status_colors,
   }
 }
@@ -371,13 +372,25 @@ onMounted(() => {
   fetchAnalysisConfig()
     .then((resp) => {
       if (resp?.data && typeof resp.data === 'object') {
+        // 直接替换整个 analysisConfig，不用 spread-merge instance_defaults，
+        // 避免旧的 observed_pci_drop / observed_years 等字段永久残留。
+        const data = resp.data
         analysisConfig.value = {
-          ...analysisConfig.value,
-          ...resp.data,
-          instance_defaults: {
-            ...analysisConfig.value.instance_defaults,
-            ...(resp.data.instance_defaults || {})
-          }
+          instance_defaults: data.instance_defaults && typeof data.instance_defaults === 'object'
+            ? { ...data.instance_defaults }
+            : analysisConfig.value.instance_defaults,
+          param_schema: Array.isArray(data.param_schema)
+            ? data.param_schema
+            : analysisConfig.value.param_schema,
+          result_schema: Array.isArray(data.result_schema)
+            ? data.result_schema
+            : analysisConfig.value.result_schema,
+          thresholds: data.thresholds && typeof data.thresholds === 'object'
+            ? { ...data.thresholds }
+            : analysisConfig.value.thresholds,
+          status_colors: data.status_colors && typeof data.status_colors === 'object'
+            ? { ...data.status_colors }
+            : analysisConfig.value.status_colors,
         }
       }
     })

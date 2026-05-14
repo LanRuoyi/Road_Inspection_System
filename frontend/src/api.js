@@ -58,4 +58,9 @@ export const buildROSWebSocketUrl = () => {
   return `${wsBase}/ros/ws`;
 };
 
+export const fetchRecordImageUrl = (recordId, channel = null) => {
+  const base = `${apiClient.defaults.baseURL}/image/${encodeURIComponent(recordId)}`;
+  return channel !== null && channel !== undefined ? `${base}?channel=${channel}` : base;
+};
+
 export { apiClient };

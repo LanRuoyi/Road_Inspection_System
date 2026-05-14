@@ -108,6 +108,89 @@ def _pick_primary_type_bbox(boxes: List[Dict[str, Any]], fallback_type: str) -> 
     return _normalize_disease_type(primary.get("type")) or fallback_type, list(primary.get("bbox") or [])
 
 
+def _iou(box_a: List[float], box_b: List[float]) -> float:
+    """Calculate IoU between two [x, y, w, h] boxes."""
+    ax, ay, aw, ah = box_a[0], box_a[1], box_a[2], box_a[3]
+    bx, by, bw, bh = box_b[0], box_b[1], box_b[2], box_b[3]
+    ax2, ay2 = ax + aw, ay + ah
+    bx2, by2 = bx + bw, by + bh
+    ix = max(0.0, min(ax2, bx2) - max(ax, bx))
+    iy = max(0.0, min(ay2, by2) - max(ay, by))
+    intersection = ix * iy
+    if intersection <= 0:
+        return 0.0
+    area_a = aw * ah
+    area_b = bw * bh
+    union = area_a + area_b - intersection
+    return intersection / union if union > 0 else 0.0
+
+
+def nms_merge_boxes(
+    boxes_a: List[Dict[str, Any]], boxes_b: List[Dict[str, Any]], iou_threshold: float = 0.5
+) -> List[Dict[str, Any]]:
+    """Combine boxes from two channels and deduplicate via per-type NMS."""
+    combined = list(boxes_a) + list(boxes_b)
+    if not combined:
+        return []
+
+    by_type: Dict[str, List[Dict[str, Any]]] = {}
+    for item in combined:
+        if not isinstance(item, dict):
+            continue
+        bbox = item.get("bbox")
+        if not isinstance(bbox, list) or len(bbox) < 4:
+            continue
+        t = _normalize_disease_type(item.get("type"))
+        if not t:
+            continue
+        by_type.setdefault(t, []).append(item)
+
+    merged: List[Dict[str, Any]] = []
+    for t, items in by_type.items():
+        items.sort(
+            key=lambda x: float(x.get("bbox", [0, 0, 0, 0])[2]) * float(x.get("bbox", [0, 0, 0, 0])[3]),
+            reverse=True,
+        )
+        kept: List[Dict[str, Any]] = []
+        for item in items:
+            bbox_a = item["bbox"]
+            suppressed = False
+            for k in kept:
+                if _iou(bbox_a, k["bbox"]) > iou_threshold:
+                    suppressed = True
+                    break
+            if not suppressed:
+                kept.append(item)
+        merged.extend(kept)
+
+    return merged
+
+
+def _strip_channel_suffix(stem: str) -> Tuple[Optional[str], Optional[int]]:
+    """Extract base name and channel number from a filename stem.
+
+    e.g. '20260327T084657_886372Z_ch0' -> ('20260327T084657_886372Z', 0)
+    """
+    import re
+    m = re.search(r'_ch(\d+)$', stem)
+    if m:
+        return stem[:m.start()], int(m.group(1))
+    return None, None
+
+
+def _parse_image_stamp_ns(data: Dict[str, Any]) -> Optional[int]:
+    """Extract image_stamp as total nanoseconds since epoch."""
+    stamp = data.get("image_stamp")
+    if isinstance(stamp, dict):
+        sec = stamp.get("sec", 0)
+        nsec = stamp.get("nanosec", 0)
+        try:
+            return int(sec) * 1_000_000_000 + int(nsec)
+        except (ValueError, TypeError):
+            pass
+    return None
+
+
 def _extract_lat_lon(data: Dict[str, Any]) -> Tuple[Optional[float], Optional[float]]:
     lat = _safe_float(data.get("lat"))
     lon = _safe_float(data.get("lon"))

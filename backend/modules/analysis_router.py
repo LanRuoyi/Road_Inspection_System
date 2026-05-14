@@ -21,10 +21,10 @@ from config.settings import (
 from modules.pci import (
     DistressMeasurement,
     DistressType,
-    PavementPerformanceModel,
     PavementSection,
     PCICalculator,
-    CDICalculator,
+    PCIPredictionModel,
+    AnomalyDetector,
     SeverityLevel,
 )
 from modules.data_utils import _safe_float, _normalize_disease_type, _strip_type
@@ -60,7 +60,21 @@ analysis_instance_lock = Lock()
 analysis_instances_store: List[Dict[str, Any]] = []
 
 pci_calculator = PCICalculator()
-cdi_calculator = CDICalculator()
+
+# 预测模型实例按需创建 (气候分区来自请求参数)
+_predictor_cache: Dict[str, PCIPredictionModel] = {}
+_detector_cache: Dict[str, AnomalyDetector] = {}
+
+def _get_predictor(climate_zone: str) -> PCIPredictionModel:
+    if climate_zone not in _predictor_cache:
+        _predictor_cache[climate_zone] = PCIPredictionModel(climate_zone=climate_zone)
+    return _predictor_cache[climate_zone]
+
+def _get_detector(predictor: PCIPredictionModel) -> AnomalyDetector:
+    key = predictor.climate_zone
+    if key not in _detector_cache:
+        _detector_cache[key] = AnomalyDetector(model_rmse=predictor.get_rmse())
+    return _detector_cache[key]
 
 SUPPORTED_DISTRESS_VALUES = {
     item.get("value")
@@ -311,6 +325,13 @@ def _evaluate_segment(segment: SegmentAssessmentPayload) -> Dict[str, Any]:
     section = _build_section(segment.instance_id, points, merged_params)
     section_area_m2 = max(1.0, float(section.total_area))
 
+    prediction_years = _safe_positive_float(
+        merged_params.get("prediction_years"), ANALYSIS_INSTANCE_DEFAULTS["prediction_years"], 0
+    )
+    pixel_to_meter = _safe_positive_float(
+        merged_params.get("pixel_to_meter"), ANALYSIS_INSTANCE_DEFAULTS["pixel_to_meter"], 0.0001
+    )
+
     if not matched_record_ids:
         return {
             "instance_id": segment.instance_id,
@@ -318,28 +339,19 @@ def _evaluate_segment(segment: SegmentAssessmentPayload) -> Dict[str, Any]:
             "color": colors.get("no_data"),
             "matched_record_count": 0,
             "current_pci": None,
-            "current_cdi": None,
             "predicted_pci": None,
-            "predicted_cdi": None,
-            "sawi": None,
-            "sawi_risk_level": "NO_DATA",
+            "anomaly_z_score": None,
+            "anomaly_level": "NO_DATA",
             "reasons": ["当前路段范围内无病害记录"],
             "input_snapshot": {
                 "section_length_m": round(section.length, 2),
                 "section_width_m": round(section.width, 2),
                 "section_area_m2": round(section_area_m2, 2),
-                "prediction_years": _safe_positive_float(
-                    merged_params.get("prediction_years"), ANALYSIS_INSTANCE_DEFAULTS["prediction_years"], 0
-                ),
-                "pixel_to_meter": _safe_positive_float(
-                    merged_params.get("pixel_to_meter"), ANALYSIS_INSTANCE_DEFAULTS["pixel_to_meter"], 0.0001
-                ),
+                "prediction_years": prediction_years,
+                "pixel_to_meter": pixel_to_meter,
             },
         }
 
-    pixel_to_meter = _safe_positive_float(
-        merged_params.get("pixel_to_meter"), ANALYSIS_INSTANCE_DEFAULTS["pixel_to_meter"], 0.0001
-    )
     sample_unit_area = section_area_m2
     distresses = _build_distresses(matched_record_ids, sample_unit_area, pixel_to_meter)
 
@@ -350,60 +362,95 @@ def _evaluate_segment(segment: SegmentAssessmentPayload) -> Dict[str, Any]:
             "color": colors.get("no_data"),
             "matched_record_count": 0,
             "current_pci": None,
-            "current_cdi": None,
             "predicted_pci": None,
-            "predicted_cdi": None,
-            "sawi": None,
-            "sawi_risk_level": "NO_DATA",
+            "anomaly_z_score": None,
+            "anomaly_level": "NO_DATA",
             "reasons": ["病害记录类型无法映射到分析模型"],
             "input_snapshot": {
                 "section_length_m": round(section.length, 2),
                 "section_width_m": round(section.width, 2),
                 "section_area_m2": round(section_area_m2, 2),
-                "prediction_years": _safe_positive_float(
-                    merged_params.get("prediction_years"), ANALYSIS_INSTANCE_DEFAULTS["prediction_years"], 0
-                ),
+                "prediction_years": prediction_years,
                 "pixel_to_meter": pixel_to_meter,
             },
         }
 
-    prediction_years = _safe_positive_float(
-        merged_params.get("prediction_years"), ANALYSIS_INSTANCE_DEFAULTS["prediction_years"], 0
-    )
-    observed_pci_drop = _safe_positive_float(
-        merged_params.get("observed_pci_drop"), ANALYSIS_INSTANCE_DEFAULTS["observed_pci_drop"], 0
-    )
-    observed_years = _safe_positive_float(
-        merged_params.get("observed_years"), ANALYSIS_INSTANCE_DEFAULTS["observed_years"], 0.1
-    )
-
+    # 当前 PCI (ASTM D6433 标准)
     current_pci = pci_calculator.calculate_pci(distresses)
-    current_cdi = cdi_calculator.calculate_cdi_from_pci(current_pci, distresses)
 
-    model = PavementPerformanceModel(section)
-    predicted_cdi = model.formula_1_predict_cdi(current_cdi, prediction_years)
-    predicted_pci = predicted_cdi
+    # 构建回归模型输入
+    climate_zone = str(merged_params.get("climate_zone") or ANALYSIS_INSTANCE_DEFAULTS["climate_zone"])
+    predictor = _get_predictor(climate_zone)
+    detector = _get_detector(predictor)
 
-    sawi_result = model.formula_2_sawi(observed_pci_drop, observed_years)
-    sawi = float(sawi_result.get("sawi", 0))
+    # 汇总病害量
+    from .pci import PavementAnalysisEngine
+    _engine = PavementAnalysisEngine(climate_zone=climate_zone)
+    distress_values = _engine._aggregate_distress_values(distresses)
 
-    status = "warning"
+    # 补充 YOLO 未检测病害的默认值
+    for key, default_key in [
+        ("rutting", "default_rutting_mm"),
+        ("fatigue_cracking", "default_fatigue_crack_m2"),
+        ("transverse_cracking", "default_transverse_crack_m"),
+        ("bleeding", "default_bleeding_m2"),
+        ("raveling", "default_raveling_m2"),
+    ]:
+        if distress_values.get(key, 0) == 0:
+            default_val = _safe_positive_float(
+                merged_params.get(default_key),
+                ANALYSIS_INSTANCE_DEFAULTS.get(default_key, 0.0),
+                0
+            )
+            if key == "transverse_cracking":
+                # 长度类转换 (默认值单位为 m)
+                distress_values[key] = default_val * 0.5
+            elif key == "rutting":
+                # 车辙单位为 mm，直接使用
+                distress_values[key] = default_val
+            else:
+                distress_values[key] = default_val
+
+    # 路龄计算
+    import datetime
+    current_year = max(section.construction_year, section.last_maintenance_year)
+    age = float(datetime.datetime.now().year - current_year)
+    if age < 0:
+        age = 0.0
+
+    # 回归模型 PCI 估计
+    current_pci_estimated = predictor.predict_current(age, distress_values)
+
+    # 未来 PCI 预测
+    predicted_pci = predictor.predict_future(
+        age, prediction_years, distress_values,
+        traffic_growth_rate=float(getattr(section, "traffic_growth_rate", 0.02))
+    )
+
+    # 异常检测
+    anomaly = detector.analyze(current_pci, current_pci_estimated)
+    z_score = float(anomaly.get("z_score", 0))
+    anomaly_level = str(anomaly.get("anomaly_level", "NORMAL"))
+
+    # 状态判定
+    abs_z = abs(z_score)
+    healthy_pci_threshold = float(thresholds.get("healthy_pci_threshold", 60.0))
+    warning_z = float(thresholds.get("anomaly_warning_z", 1.0))
+    danger_z = float(thresholds.get("anomaly_danger_z", 2.0))
+
     reasons = []
-    if sawi > float(thresholds.get("sawi_danger_threshold", 1.5)):
+    if abs_z > danger_z:
         status = "danger"
-        reasons.append("SAWI 超过危险阈值")
-    elif predicted_pci < float(thresholds.get("prediction_pci_warning_threshold", 70.0)):
+        reasons.append(f"异常退化指数 |z|={abs_z:.2f} 超过危险阈值 {danger_z}")
+    elif abs_z > warning_z or predicted_pci < healthy_pci_threshold:
         status = "warning"
-        reasons.append("预测PCI将在设定年限内跌破阈值")
-    elif (
-        current_pci > float(thresholds.get("healthy_pci_threshold", 70.0))
-        and sawi <= float(thresholds.get("sawi_normal_max", 1.0))
-    ):
-        status = "healthy"
-        reasons.append("PCI 高于阈值且 SAWI 处于正常范围")
+        if abs_z > warning_z:
+            reasons.append(f"异常退化指数 |z|={abs_z:.2f} 超过警告阈值 {warning_z}")
+        if predicted_pci < healthy_pci_threshold:
+            reasons.append(f"预测 PCI={predicted_pci:.1f} 将在 {prediction_years} 年内跌破 {healthy_pci_threshold}")
     else:
-        status = "warning"
-        reasons.append("当前指标处于临界区间，建议关注")
+        status = "healthy"
+        reasons.append("PCI 和异常退化指数均在正常范围")
 
     return {
         "instance_id": segment.instance_id,
@@ -411,20 +458,21 @@ def _evaluate_segment(segment: SegmentAssessmentPayload) -> Dict[str, Any]:
         "color": colors.get(status, colors.get("warning")),
         "matched_record_count": len(matched_record_ids),
         "current_pci": round(float(current_pci), 2),
-        "current_cdi": round(float(current_cdi), 2),
         "predicted_pci": round(float(predicted_pci), 2),
-        "predicted_cdi": round(float(predicted_cdi), 2),
-        "sawi": round(float(sawi), 3),
-        "sawi_risk_level": sawi_result.get("risk_level"),
+        "anomaly_z_score": round(z_score, 3),
+        "anomaly_level": anomaly_level,
+        "anomaly_detail": anomaly,
         "reasons": reasons,
-        "risk_detail": sawi_result,
         "input_snapshot": {
             "section_length_m": round(section.length, 2),
             "section_width_m": round(section.width, 2),
             "section_area_m2": round(section_area_m2, 2),
+            "climate_zone": climate_zone,
+            "age_years": round(age, 1),
             "prediction_years": prediction_years,
             "aadtt_k_per_day": round(float(section.aadtt), 4),
             "pixel_to_meter": pixel_to_meter,
+            "distress_values": {k: round(v, 4) for k, v in distress_values.items()},
         },
     }
 
@@ -565,11 +613,9 @@ async def assess_analysis_segments(request: SegmentAssessmentRequest):
                     "color": ANALYSIS_STATUS_COLORS.get("warning"),
                     "matched_record_count": 0,
                     "current_pci": None,
-                    "current_cdi": None,
                     "predicted_pci": None,
-                    "predicted_cdi": None,
-                    "sawi": None,
-                    "sawi_risk_level": "ERROR",
+                    "anomaly_z_score": None,
+                    "anomaly_level": "ERROR",
                     "reasons": [f"评估失败: {exc}"],
                 }
             )

@@ -16,6 +16,7 @@ UPLOAD_TMP_DIR = DATA_PATH.parent / "upload_tmp"
 UPLOAD_TMP_DIR.mkdir(parents=True, exist_ok=True)
 
 records_store: Dict[str, Dict[str, Any]] = {}
+channel_alias_map: Dict[str, str] = {}  # individual ch0/ch1 record_id -> merged record_id
 ros_manager = ROSManager()
 upload_sessions: Dict[str, Dict[str, Any]] = {}
 upload_lock = Lock()
@@ -25,6 +26,7 @@ settings_lock = Lock()
 
 
 def init_data():
+    global channel_alias_map
     try:
         raw_data = load_disease_records(DATA_PATH)
     except Exception as e:
@@ -32,12 +34,30 @@ def init_data():
         raw_data = []
 
     records_store.clear()
+    channel_alias_map.clear()
     for item in raw_data:
-        try:
-            file_id = os.path.basename(item["img_path"]).split(".")[0]
-            records_store[file_id] = item
-        except Exception:
+        rid = item.get("record_id")
+        if not rid:
             continue
+        records_store[rid] = item
+
+        # Create alias entries for individual channel record IDs
+        channels = item.get("channels")
+        if isinstance(channels, dict):
+            for ch_key, ch_info in channels.items():
+                if not isinstance(ch_info, dict):
+                    continue
+                ch_id = ch_info.get("record_id")
+                if not ch_id:
+                    continue
+                channel_alias_map[ch_id] = rid
+                alias_entry = dict(item)
+                alias_entry["_is_alias"] = True
+                alias_entry["_merged_id"] = rid
+                alias_entry["record_id"] = ch_id
+                alias_entry["img_path"] = ch_info.get("img_path") or item.get("img_path", "")
+                alias_entry["channel"] = int(ch_key)
+                records_store[ch_id] = alias_entry
 
 
 def _safe_json_load(path: Path, default_value: Any) -> Any:
