@@ -176,21 +176,38 @@ def load_disease_records(directory):
         c0 = sorted(ch0_by_date.get(date_key, []), key=lambda r: r.get("_image_stamp_ns") or 0)
         c1 = sorted(ch1_by_date.get(date_key, []), key=lambda r: r.get("_image_stamp_ns") or 0)
 
-        # Order-based pairing: ith ch0 pairs with ith ch1 if within time window
-        for i in range(min(len(c0), len(c1))):
-            ns0 = c0[i].get("_image_stamp_ns")
-            ns1 = c1[i].get("_image_stamp_ns")
-            if ns0 is not None and ns1 is not None and abs(ns0 - ns1) <= MAX_DELTA:
-                merged.append(_merge_dual_records(c0[i], c1[i]))
-                c0[i] = None  # mark as paired
-                c1[i] = None
+        # Greedy closest-timestamp pairing: enumerate all candidate pairs within the
+        # time window, then match from smallest delta to largest. This avoids index-
+        # shift mispairing when one channel has extra unpaired records at the front.
+        candidates: List[Tuple[int, int, int]] = []  # (delta_ns, idx_c0, idx_c1)
+        for i, r0 in enumerate(c0):
+            ns0 = r0.get("_image_stamp_ns")
+            if ns0 is None:
+                continue
+            for j, r1 in enumerate(c1):
+                ns1 = r1.get("_image_stamp_ns")
+                if ns1 is None:
+                    continue
+                delta = abs(ns0 - ns1)
+                if delta <= MAX_DELTA:
+                    candidates.append((delta, i, j))
+
+        candidates.sort(key=lambda x: x[0])  # closest pairs first
+
+        paired_c0: set = set()
+        paired_c1: set = set()
+        for _delta, i, j in candidates:
+            if i not in paired_c0 and j not in paired_c1:
+                merged.append(_merge_dual_records(c0[i], c1[j]))
+                paired_c0.add(i)
+                paired_c1.add(j)
 
         # Unpaired records stay as single-channel
-        for r in c0:
-            if r is not None:
+        for i, r in enumerate(c0):
+            if i not in paired_c0:
                 merged.append(r)
-        for r in c1:
-            if r is not None:
+        for j, r in enumerate(c1):
+            if j not in paired_c1:
                 merged.append(r)
 
     merged.extend(single_records)
