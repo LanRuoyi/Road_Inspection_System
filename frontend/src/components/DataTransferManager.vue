@@ -56,7 +56,6 @@
             class="pane-table"
             border
             @selection-change="onSelectionChange"
-            @row-click="onRemoteRowClick"
           >
             <el-table-column type="selection" :reserve-selection="true" width="40" :resizable="true" />
             <el-table-column prop="item_id" label="ID" min-width="170" :resizable="true" />
@@ -95,8 +94,6 @@ import {
 import { UNKNOWN_TYPE_SET, POLLING } from '../utils/constants'
 import { toFiniteNumber } from '../utils/helpers'
 
-defineProps({})
-
 const localRecords = ref([])
 const devices = ref([])
 const selectedDevice = ref('')
@@ -105,7 +102,6 @@ const selectedRemoteIds = ref([])
 const lastManifestUpdatedAt = ref(0)
 const nowSec = ref(Date.now() / 1000)
 const remoteTableRef = ref(null)
-const lastClickedIndex = ref(-1)
 
 let localPollingTimer = null
 let devicePollingTimer = null
@@ -256,35 +252,6 @@ const onSelectionChange = (rows) => {
   selectedRemoteIds.value = rows.map((x) => x.item_id).filter(Boolean)
 }
 
-const onRemoteRowClick = (row, column, event) => {
-  // ignore clicks on the checkbox column itself — let el-table handle those
-  if (column && column.type === 'selection') return
-
-  const currentIndex = remoteItems.value.indexOf(row)
-  if (currentIndex === -1) return
-
-  if (event.shiftKey && lastClickedIndex.value >= 0) {
-    const start = Math.min(lastClickedIndex.value, currentIndex)
-    const end = Math.max(lastClickedIndex.value, currentIndex)
-
-    const anchorRow = remoteItems.value[lastClickedIndex.value]
-    const select = selectedRemoteIds.value.includes(anchorRow?.item_id)
-
-    const tableRef = remoteTableRef.value
-    if (!tableRef) return
-
-    for (let i = start; i <= end; i++) {
-      const r = remoteItems.value[i]
-      if (r) {
-        tableRef.toggleRowSelection(r, select)
-      }
-    }
-    return
-  }
-
-  lastClickedIndex.value = currentIndex
-}
-
 const startPull = async () => {
   if (!selectedDevice.value || selectedRemoteIds.value.length === 0) {
     return
@@ -327,6 +294,77 @@ const stopAutoPolling = () => {
   }
 }
 
+// ---- Shift-click range selection (file-manager style) ----
+const lastClickedIndex = ref(-1)
+
+let _boundTableEl = null
+
+const _bindShiftClick = () => {
+  const el = remoteTableRef.value?.$el
+  if (!el || el === _boundTableEl) return
+  _boundTableEl = el
+  el.addEventListener('click', _onTableCaptureClick, true)
+}
+
+const _unbindShiftClick = () => {
+  if (_boundTableEl) {
+    _boundTableEl.removeEventListener('click', _onTableCaptureClick, true)
+    _boundTableEl = null
+  }
+}
+
+const _getRowIndex = (target) => {
+  const row = target.closest('tr.el-table__row')
+  if (!row) return -1
+  const tbody = row.parentElement
+  if (!tbody) return -1
+  const rows = Array.from(tbody.querySelectorAll('tr.el-table__row'))
+  const idx = rows.indexOf(row)
+  if (idx < 0 || idx >= remoteItems.value.length) return -1
+  return idx
+}
+
+const _applyShiftRangeSelection = (idx) => {
+  if (lastClickedIndex.value < 0) return
+
+  const start = Math.min(lastClickedIndex.value, idx)
+  const end = Math.max(lastClickedIndex.value, idx)
+
+  const anchorRow = remoteItems.value[lastClickedIndex.value]
+  const select = selectedRemoteIds.value.includes(anchorRow?.item_id)
+
+  const tableRef = remoteTableRef.value
+  if (!tableRef) return
+
+  for (let i = start; i <= end; i++) {
+    const r = remoteItems.value[i]
+    if (r) tableRef.toggleRowSelection(r, select)
+  }
+}
+
+const _onTableCaptureClick = (e) => {
+  if (!(e.target instanceof Element)) return
+
+  const idx = _getRowIndex(e.target)
+  if (idx < 0) return
+
+  const isCheckbox = !!e.target.closest('.el-checkbox')
+
+  if (!e.shiftKey || lastClickedIndex.value < 0) {
+    if (isCheckbox) lastClickedIndex.value = idx
+    return
+  }
+
+  // intercept checkbox click before Element Plus toggles a single row
+  if (isCheckbox) {
+    e.stopPropagation()
+    e.preventDefault()
+  }
+
+  _applyShiftRangeSelection(idx)
+}
+
+// ---- lifecycle ----
 watch(selectedDevice, async (next, prev) => {
   if (!next || next === prev) {
     return
@@ -342,10 +380,13 @@ onMounted(async () => {
     await refreshManifest()
   }
   startAutoPolling()
+  await nextTick()
+  _bindShiftClick()
 })
 
 onUnmounted(() => {
   stopAutoPolling()
+  _unbindShiftClick()
 })
 </script>
 

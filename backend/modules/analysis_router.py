@@ -344,6 +344,7 @@ def _evaluate_segment(segment: SegmentAssessmentPayload) -> Dict[str, Any]:
             "color": colors.get("no_data"),
             "matched_record_count": 0,
             "current_pci": None,
+            "normal_baseline": None,
             "predicted_pci": None,
             "anomaly_z_score": None,
             "anomaly_level": "NO_DATA",
@@ -423,10 +424,7 @@ def _evaluate_segment(segment: SegmentAssessmentPayload) -> Dict[str, Any]:
     if age < 0:
         age = 0.0
 
-    # 回归模型 PCI 估计
-    current_pci_estimated = predictor.predict_current(age, distress_values)
-
-    # 未来 PCI 预测 (HDM-4 增量模型推演)
+    # 路段参数（供退化推演和异常基准共用）
     section_params = {
         "asphalt_thickness_m": float(section.asphalt_thickness),
         "base_thickness_m": float(section.base_thickness),
@@ -437,15 +435,22 @@ def _evaluate_segment(segment: SegmentAssessmentPayload) -> Dict[str, Any]:
         "defl_mm": float(getattr(section, "defl", 0.5)),
         "mmp_mm_per_month": float(getattr(section, "mmp", 50.0)),
     }
+
+    # 未来 PCI 预测
     predicted_pci = predictor.predict_future(
         age, prediction_years, distress_values,
         section_params=section_params,
+        current_measured_pci=current_pci,
     )
 
-    # 异常检测
-    anomaly = detector.analyze(current_pci, current_pci_estimated)
+    # 异常检测：实测 PCI vs 综合考虑年龄/交通/结构/环境的正常退化基准
+    normal_baseline = predictor.compute_normal_baseline(age, section_params)
+    anomaly = detector.analyze(current_pci, normal_baseline)
     z_score = float(anomaly.get("z_score", 0))
     anomaly_level = str(anomaly.get("anomaly_level", "NORMAL"))
+
+    # 回归模型 PCI 估计（含病害，供参考）
+    current_pci_estimated = predictor.predict_current(age, distress_values)
 
     # 状态判定
     abs_z = abs(z_score)
@@ -473,6 +478,7 @@ def _evaluate_segment(segment: SegmentAssessmentPayload) -> Dict[str, Any]:
         "color": colors.get(status, colors.get("warning")),
         "matched_record_count": len(matched_record_ids),
         "current_pci": round(float(current_pci), 2),
+        "normal_baseline": round(float(normal_baseline), 2),
         "predicted_pci": round(float(predicted_pci), 2),
         "anomaly_z_score": round(z_score, 3),
         "anomaly_level": anomaly_level,
