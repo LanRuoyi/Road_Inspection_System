@@ -174,7 +174,13 @@ class PavementSection:
     aadtt: float = 2.0               # 千辆/日
     traffic_growth_rate: float = 0.02
     lane_distribution_factor: float = 0.8
-    
+    avg_lef: float = 1.0             # 平均荷载等效因子 (LEF)
+
+    # HDM-4 增量模型参数
+    comp: float = 95.0               # 相对压实度 (%)
+    defl: float = 0.5                # Benkelman 梁弯沉值 (mm)
+    mmp: float = 50.0                # 月均降水量 (mm/月)
+
     @property
     def total_area(self) -> float:
         """路段总面积 (m²)"""
@@ -476,18 +482,40 @@ class PCIPredictionModel:
         "raveling": "m^2",
     }
 
-    # HDM-4 参考劣化率 (年增长率，用于病害量前向投影)
-    # 来源: Morosiuk, Riley & Odoki, HDM-4 Volume 6, PIARC/World Bank, 2004
-    DEFAULT_DETERIORATION_RATES = {
-        "rutting": 0.15,
-        "fatigue_cracking": 0.08,
-        "block_cracking": 0.03,
-        "longitudinal_cracking": 0.05,
-        "transverse_cracking": 0.05,
-        "patching": 0.04,
-        "potholes": 0.06,
-        "bleeding": 0.02,
-        "raveling": 0.03,
+    # HDM-4 增量劣化模型默认系数 (沥青混凝土路面)
+    # 来源: HDM-4 Volume 6, PIARC/World Bank, 2004 [27]
+    HDM4_COEFFICIENTS = {
+        # 裂缝萌生 (式6-8): T₀ = K_cia × (SNP+1)⁻⁴ × YE4⁻¹
+        "K_cia": 1.0,
+        # 裂缝扩展 (式6-9): ΔX₂ = K_crp × a0 × X₂^a1 × (SNP+1)^(-a2) × YE4^a3
+        "K_crp": 1.0,
+        "crack_a0": 0.005,
+        "crack_a1": 0.5,
+        "crack_a2": 2.0,
+        "crack_a3": 1.0,
+        # 车辙初始压密 (式6-10): RDO = K_ri × [a0 × 10^(a1+a2·DEF) × (YE4/SNP)^a3]^a4
+        "K_ri": 1.0,
+        "rdo_a0": 0.5,
+        "rdo_a1": -0.5,
+        "rdo_a2": -0.3,
+        "rdo_a3": 0.5,
+        "rdo_a4": 1.0,
+        # 车辙结构性变形-开裂前 (式6-11): ΔX₁_uc = K_rst × b0 × SNP^(-b1) × YE4^b2 × COMP^(-b3)
+        "K_rst": 1.0,
+        "rut_b0": 0.01,
+        "rut_b1": 2.0,
+        "rut_b2": 1.0,
+        "rut_b3": 1.0,
+        # 车辙结构性变形-开裂后 (式6-12): ΔX₁_crk = K_rst × c0 × SNP^(-c1) × YE4^c2 × MMP^c3 × X₂^c4
+        "rut_c0": 0.02,
+        "rut_c1": 1.5,
+        "rut_c2": 1.2,
+        "rut_c3": 0.5,
+        "rut_c4": 0.3,
+        # 结构数计算 (式6-6): SNP = a1×D1 + a2×D2×m2
+        "a1": 0.44,    # 沥青层系数
+        "a2": 0.14,    # 粒料基层系数
+        "m2": 1.0,     # 排水系数
     }
 
     def __init__(self, climate_zone: str = "wet_no_freeze"):
@@ -528,38 +556,147 @@ class PCIPredictionModel:
 
         return max(0.0, min(100.0, pci))
 
+    @staticmethod
+    def _compute_snp(asphalt_thickness_m: float, base_thickness_m: float) -> float:
+        """计算路面结构数 SNP (式6-6)"""
+        D1_inch = asphalt_thickness_m / 0.0254
+        D2_inch = base_thickness_m / 0.0254
+        c = PCIPredictionModel.HDM4_COEFFICIENTS
+        return c["a1"] * D1_inch + c["a2"] * D2_inch * c["m2"]
+
+    @staticmethod
+    def _compute_ye4(aadtt_k_per_day: float, avg_lef: float,
+                     traffic_growth_rate: float, year_index: int) -> float:
+        """计算第 t 年的 YE4 (百万 ESAL/车道) (式6-7 简化)"""
+        annual_truck_count = aadtt_k_per_day * 1000.0 * 365.0
+        ye4_base = annual_truck_count * avg_lef / 1e6
+        return ye4_base * (1.0 + traffic_growth_rate) ** (year_index - 1)
+
     def predict_future(
         self,
         current_age: float,
         prediction_years: float,
         distress_values: Dict[str, float],
-        traffic_growth_rate: float = 0.02,
+        section_params: Optional[Dict[str, float]] = None,
     ) -> float:
         """
-        预测未来 PCI。
+        基于 HDM-4 增量劣化模型逐年推演病害量，代入 Ali 回归方程预测未来 PCI。
 
-        假设各病变量按参考劣化率增长:
-          distress_future = distress_current * (1 + r * dt * (1 + g))
-        其中 r 为病变量基础劣化率，g 为交通增长率修正因子。
+        HDM-4 推演流程 (对应论文 §6.3.3.6):
+          For t = 1 to Δt:
+            (1) 更新路龄: X₀ = current_age + t
+            (2) 计算当年 YE4 (式6-7)
+            (3) 判断裂缝萌生 (式6-8): 若 X₀ ≥ T₀ 则计算 ΔX₂ (式6-9)
+            (4) 计算车辙年增量 (式6-11 或 式6-12)
+          End For
+          代入 Ali 回归方程 (式6-4/6-5) 得 PCI 预测值
 
         Args:
             current_age: 当前路龄 (年)
-            prediction_years: 预测年限
-            distress_values: 当前病害测量值
-            traffic_growth_rate: 交通年增长率
+            prediction_years: 预测年限 Δt
+            distress_values: 当前病害测量值字典
+            section_params: 路段级参数，可包含:
+                - asphalt_thickness_m (默认 0.15)
+                - base_thickness_m (默认 0.30)
+                - aadtt_k_per_day (默认 2.0)
+                - avg_lef (默认 1.0)
+                - traffic_growth_rate (默认 0.02)
+                - comp_pct (默认 95.0)
+                - defl_mm (默认 0.5)
+                - mmp_mm_per_month (默认 50.0)
+                - K_cia, K_crp, K_ri, K_rst (HDM-4 校准系数，默认 1.0)
 
         Returns:
             未来 PCI 预测值
         """
-        future_age = current_age + prediction_years
-        future_distress = {}
+        sp = section_params or {}
+        c = self.HDM4_COEFFICIENTS
 
-        for var_name, current_value in distress_values.items():
-            if var_name == "age":
-                continue
-            base_rate = self.DEFAULT_DETERIORATION_RATES.get(var_name, 0.05)
-            growth = base_rate * prediction_years * (1.0 + traffic_growth_rate)
-            future_distress[var_name] = current_value * (1.0 + growth)
+        # ---- 提取路段参数 ----
+        asphalt_m = float(sp.get("asphalt_thickness_m", 0.15))
+        base_m = float(sp.get("base_thickness_m", 0.30))
+        aadtt = float(sp.get("aadtt_k_per_day", 2.0))
+        avg_lef = float(sp.get("avg_lef", 1.0))
+        growth = float(sp.get("traffic_growth_rate", 0.02))
+        comp = float(sp.get("comp_pct", 95.0))
+        defl_val = float(sp.get("defl_mm", 0.5))
+        mmp = float(sp.get("mmp_mm_per_month", 50.0))
+
+        # HDM-4 校准系数 (默认 1.0)
+        K_cia = float(sp.get("K_cia", c["K_cia"]))
+        K_crp = float(sp.get("K_crp", c["K_crp"]))
+        K_ri = float(sp.get("K_ri", c["K_ri"]))
+        K_rst = float(sp.get("K_rst", c["K_rst"]))
+
+        # ---- 计算 SNP (式6-6) ----
+        SNP = self._compute_snp(asphalt_m, base_m)
+
+        # ---- 初始化状态 ----
+        X2 = float(distress_values.get("fatigue_cracking", 0.0))
+        X1 = float(distress_values.get("rutting", 0.0))
+
+        # 初始压密 RDO (式6-10): 仅在模拟初期有意义
+        # 对已服役路面，RDO 已发生，不再重复累加
+        RDO = 0.0
+        if X1 == 0.0 and X2 == 0.0:
+            try:
+                inner = (c["rdo_a0"]
+                         * 10.0 ** (c["rdo_a1"] + c["rdo_a2"] * defl_val)
+                         * (aadtt / max(SNP, 0.1)) ** c["rdo_a3"])
+                if inner > 0:
+                    RDO = K_ri * (inner ** c["rdo_a4"])
+            except (OverflowError, ValueError):
+                RDO = 0.0
+
+        # ---- 逐年推演 (论文 §6.3.3.6) ----
+        n_years = max(1, int(prediction_years))
+        for t in range(1, n_years + 1):
+            age_t = current_age + t
+
+            # (1) 计算当年 YE4 (式6-7)
+            YE4 = self._compute_ye4(aadtt, avg_lef, growth, t)
+
+            # (2) 裂缝萌生判定 (式6-8)
+            denominator = (SNP + 1.0) ** 4 * YE4
+            if denominator > 1e-9:
+                T0 = K_cia / denominator
+            else:
+                T0 = 1e9  # 极小交通量，近似永不萌生
+
+            if age_t >= T0 and X2 >= 0:
+                # (3) 裂缝扩展 (式6-9)
+                X2_safe = max(X2, 0.001)  # 避免 0^0
+                dX2 = (K_crp * c["crack_a0"]
+                       * (X2_safe ** c["crack_a1"])
+                       * ((SNP + 1.0) ** (-c["crack_a2"]))
+                       * (YE4 ** c["crack_a3"]))
+                X2 += max(0.0, dX2)
+
+            # (4) 车辙年增量 (式6-11 或 式6-12)
+            if X2 <= 0:
+                # 开裂前 (式6-11)
+                dX1 = (K_rst * c["rut_b0"]
+                       * (max(SNP, 0.1) ** (-c["rut_b1"]))
+                       * (YE4 ** c["rut_b2"])
+                       * (max(comp, 1.0) ** (-c["rut_b3"])))
+            else:
+                # 开裂后 (式6-12)
+                dX1 = (K_rst * c["rut_c0"]
+                       * (max(SNP, 0.1) ** (-c["rut_c1"]))
+                       * (YE4 ** c["rut_c2"])
+                       * (max(mmp, 1.0) ** c["rut_c3"])
+                       * (max(X2, 0.001) ** c["rut_c4"]))
+            X1 += max(0.0, dX1)
+
+        # 叠加初始压密 (仅在无既有车辙时)
+        if X1 == float(distress_values.get("rutting", 0.0)):
+            X1 += RDO
+
+        # ---- 构建未来病害量字典 ----
+        future_distress = dict(distress_values)
+        future_distress["fatigue_cracking"] = X2
+        future_distress["rutting"] = X1
+        future_age = current_age + prediction_years
 
         return self.predict_current(future_age, future_distress)
 
@@ -713,10 +850,19 @@ class PavementAnalysisEngine:
         # 3. 当前 PCI 估计值 (回归模型)
         current_pci_estimated = self.predictor.predict_current(age, distress_values)
 
-        # 4. 未来 PCI 预测
-        growth = getattr(section, "traffic_growth_rate", 0.02)
+        # 4. 未来 PCI 预测 (HDM-4 增量模型推演)
+        section_params = {
+            "asphalt_thickness_m": getattr(section, "asphalt_thickness", 0.15),
+            "base_thickness_m": getattr(section, "base_thickness", 0.30),
+            "aadtt_k_per_day": getattr(section, "aadtt", 2.0),
+            "avg_lef": getattr(section, "avg_lef", 1.0),
+            "traffic_growth_rate": getattr(section, "traffic_growth_rate", 0.02),
+            "comp_pct": getattr(section, "comp", 95.0),
+            "defl_mm": getattr(section, "defl", 0.5),
+            "mmp_mm_per_month": getattr(section, "mmp", 50.0),
+        }
         predicted_pci = self.predictor.predict_future(
-            age, prediction_years, distress_values, traffic_growth_rate=growth
+            age, prediction_years, distress_values, section_params=section_params
         )
 
         # 5. 异常检测 (基于当前实测 PCI vs 回归模型估计)
@@ -733,7 +879,7 @@ class PavementAnalysisEngine:
                 "section_width_m": section.width,
                 "surface_type": section.surface_type,
                 "aadtt_k_per_day": section.aadtt,
-                "traffic_growth_rate": growth,
+                "traffic_growth_rate": getattr(section, "traffic_growth_rate", 0.02),
                 "distress_values": distress_values,
                 "distress_count": len(distresses),
             },
@@ -745,8 +891,22 @@ class PavementAnalysisEngine:
             "anomaly": anomaly,
         }
 
+    @staticmethod
+    def _aggregate_distress_values_static(
+        distresses: List[DistressMeasurement],
+    ) -> Dict[str, float]:
+        """静态版本，供外部模块（如 analysis_router）直接调用"""
+        return PavementAnalysisEngine._aggregate_distress_values_impl(distresses)
+
     def _aggregate_distress_values(
         self, distresses: List[DistressMeasurement]
+    ) -> Dict[str, float]:
+        """实例方法，供 analyze() 内部调用"""
+        return PavementAnalysisEngine._aggregate_distress_values_impl(distresses)
+
+    @staticmethod
+    def _aggregate_distress_values_impl(
+        distresses: List[DistressMeasurement],
     ) -> Dict[str, float]:
         """
         将 DistressMeasurement 列表汇总为回归模型所需的变量字典。

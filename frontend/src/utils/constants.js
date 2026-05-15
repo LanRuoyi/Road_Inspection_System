@@ -66,23 +66,24 @@ export const HEATMAP_DEFAULTS = {
   minOpacity: 0.0,
 }
 
-// 路段分析默认参数 (与后端 settings.py ANALYSIS_INSTANCE_DEFAULTS 对齐)
+// 路段分析默认参数（与后端 settings.py ANALYSIS_INSTANCE_DEFAULTS 严格对齐）
 export const ANALYSIS_INSTANCE_DEFAULTS = {
   section_width_m: 7.5,
   prediction_years: 3,
   climate_zone: 'wet_no_freeze',
   aadtt_k_per_day: 2,
   traffic_growth_rate: 0.02,
-  lane_distribution_factor: 0.8,
-  surface_type: 'AC',
   construction_year: 2020,
   last_maintenance_year: 2020,
   pixel_to_meter: 0.01,
   asphalt_thickness_m: 0.15,
   base_thickness_m: 0.3,
-  subgrade_modulus_mpa: 50,
+  avg_lef: 1.0,
+  comp_pct: 95,
+  defl_mm: 0.5,
+  mmp_mm_per_month: 50,
   default_rutting_mm: 0,
-  default_fatigue_crack_m2: 0,
+  default_longitudinal_crack_m: 0,
   default_transverse_crack_m: 0,
   default_bleeding_m2: 0,
   default_raveling_m2: 0,

@@ -56,6 +56,7 @@
             class="pane-table"
             border
             @selection-change="onSelectionChange"
+            @row-click="onRemoteRowClick"
           >
             <el-table-column type="selection" :reserve-selection="true" width="40" :resizable="true" />
             <el-table-column prop="item_id" label="ID" min-width="170" :resizable="true" />
@@ -104,6 +105,7 @@ const selectedRemoteIds = ref([])
 const lastManifestUpdatedAt = ref(0)
 const nowSec = ref(Date.now() / 1000)
 const remoteTableRef = ref(null)
+const lastClickedIndex = ref(-1)
 
 let localPollingTimer = null
 let devicePollingTimer = null
@@ -238,6 +240,7 @@ const refreshManifest = async () => {
       }
     })
     selectedRemoteIds.value = nextSelectedIds
+    lastClickedIndex.value = -1
 
     lastManifestUpdatedAt.value = Number(resp.data.updated_at || 0)
     nowSec.value = Date.now() / 1000
@@ -251,6 +254,35 @@ const refreshManifest = async () => {
 
 const onSelectionChange = (rows) => {
   selectedRemoteIds.value = rows.map((x) => x.item_id).filter(Boolean)
+}
+
+const onRemoteRowClick = (row, column, event) => {
+  // ignore clicks on the checkbox column itself — let el-table handle those
+  if (column && column.type === 'selection') return
+
+  const currentIndex = remoteItems.value.indexOf(row)
+  if (currentIndex === -1) return
+
+  if (event.shiftKey && lastClickedIndex.value >= 0) {
+    const start = Math.min(lastClickedIndex.value, currentIndex)
+    const end = Math.max(lastClickedIndex.value, currentIndex)
+
+    const anchorRow = remoteItems.value[lastClickedIndex.value]
+    const select = selectedRemoteIds.value.includes(anchorRow?.item_id)
+
+    const tableRef = remoteTableRef.value
+    if (!tableRef) return
+
+    for (let i = start; i <= end; i++) {
+      const r = remoteItems.value[i]
+      if (r) {
+        tableRef.toggleRowSelection(r, select)
+      }
+    }
+    return
+  }
+
+  lastClickedIndex.value = currentIndex
 }
 
 const startPull = async () => {

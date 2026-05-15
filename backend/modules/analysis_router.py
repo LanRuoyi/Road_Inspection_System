@@ -288,7 +288,6 @@ def _build_section(instance_id: str, points: List[List[float]], params: Dict[str
         section_id=instance_id,
         length=section_length,
         width=section_width,
-        surface_type=str(params.get("surface_type") or ANALYSIS_INSTANCE_DEFAULTS["surface_type"]),
         construction_year=_safe_int(params.get("construction_year"), ANALYSIS_INSTANCE_DEFAULTS["construction_year"], 1900),
         last_maintenance_year=_safe_int(
             params.get("last_maintenance_year"),
@@ -301,15 +300,21 @@ def _build_section(instance_id: str, points: List[List[float]], params: Dict[str
         base_thickness=_safe_positive_float(
             params.get("base_thickness_m"), ANALYSIS_INSTANCE_DEFAULTS["base_thickness_m"], 0.01
         ),
-        subgrade_modulus=_safe_positive_float(
-            params.get("subgrade_modulus_mpa"), ANALYSIS_INSTANCE_DEFAULTS["subgrade_modulus_mpa"], 1
-        ),
-        aadtt=_safe_positive_float(params.get("aadtt_k_per_day"), ANALYSIS_INSTANCE_DEFAULTS["aadtt_k_per_day"], 0.01),
+        aadtt=_safe_positive_float(params.get("aadtt_k_per_day"), ANALYSIS_INSTANCE_DEFAULTS["aadtt_k_per_day"], 0),
         traffic_growth_rate=_safe_positive_float(
             params.get("traffic_growth_rate"), ANALYSIS_INSTANCE_DEFAULTS["traffic_growth_rate"], 0
         ),
-        lane_distribution_factor=_safe_positive_float(
-            params.get("lane_distribution_factor"), ANALYSIS_INSTANCE_DEFAULTS["lane_distribution_factor"], 0.01
+        avg_lef=_safe_positive_float(
+            params.get("avg_lef"), ANALYSIS_INSTANCE_DEFAULTS.get("avg_lef", 1.0), 0
+        ),
+        comp=_safe_positive_float(
+            params.get("comp_pct"), ANALYSIS_INSTANCE_DEFAULTS.get("comp_pct", 95.0), 1.0
+        ),
+        defl=_safe_positive_float(
+            params.get("defl_mm"), ANALYSIS_INSTANCE_DEFAULTS.get("defl_mm", 0.5), 0
+        ),
+        mmp=_safe_positive_float(
+            params.get("mmp_mm_per_month"), ANALYSIS_INSTANCE_DEFAULTS.get("mmp_mm_per_month", 50.0), 0
         ),
     )
 
@@ -383,15 +388,15 @@ def _evaluate_segment(segment: SegmentAssessmentPayload) -> Dict[str, Any]:
     predictor = _get_predictor(climate_zone)
     detector = _get_detector(predictor)
 
-    # 汇总病害量
-    from .pci import PavementAnalysisEngine
-    _engine = PavementAnalysisEngine(climate_zone=climate_zone)
-    distress_values = _engine._aggregate_distress_values(distresses)
+    # 汇总病害量 (使用模块级聚合函数)
+    from .pci import PavementAnalysisEngine as _Engine
+    distress_values = _Engine._aggregate_distress_values_static(distresses)
 
-    # 补充 YOLO 未检测病害的默认值
+    # 补充 YOLO 无法检测的病害变量默认值
+    # 注意: fatigue_cracking(疲劳裂缝)由 YOLO 自动检测，不设手动默认值
     for key, default_key in [
         ("rutting", "default_rutting_mm"),
-        ("fatigue_cracking", "default_fatigue_crack_m2"),
+        ("longitudinal_cracking", "default_longitudinal_crack_m"),
         ("transverse_cracking", "default_transverse_crack_m"),
         ("bleeding", "default_bleeding_m2"),
         ("raveling", "default_raveling_m2"),
@@ -402,8 +407,8 @@ def _evaluate_segment(segment: SegmentAssessmentPayload) -> Dict[str, Any]:
                 ANALYSIS_INSTANCE_DEFAULTS.get(default_key, 0.0),
                 0
             )
-            if key == "transverse_cracking":
-                # 长度类转换 (默认值单位为 m)
+            if key in ("longitudinal_cracking", "transverse_cracking"):
+                # 长度类转换 (默认值单位为 m → 面积 m²，乘以假定的裂缝宽度 0.5 m)
                 distress_values[key] = default_val * 0.5
             elif key == "rutting":
                 # 车辙单位为 mm，直接使用
@@ -421,10 +426,20 @@ def _evaluate_segment(segment: SegmentAssessmentPayload) -> Dict[str, Any]:
     # 回归模型 PCI 估计
     current_pci_estimated = predictor.predict_current(age, distress_values)
 
-    # 未来 PCI 预测
+    # 未来 PCI 预测 (HDM-4 增量模型推演)
+    section_params = {
+        "asphalt_thickness_m": float(section.asphalt_thickness),
+        "base_thickness_m": float(section.base_thickness),
+        "aadtt_k_per_day": float(section.aadtt),
+        "avg_lef": float(getattr(section, "avg_lef", 1.0)),
+        "traffic_growth_rate": float(getattr(section, "traffic_growth_rate", 0.02)),
+        "comp_pct": float(getattr(section, "comp", 95.0)),
+        "defl_mm": float(getattr(section, "defl", 0.5)),
+        "mmp_mm_per_month": float(getattr(section, "mmp", 50.0)),
+    }
     predicted_pci = predictor.predict_future(
         age, prediction_years, distress_values,
-        traffic_growth_rate=float(getattr(section, "traffic_growth_rate", 0.02))
+        section_params=section_params,
     )
 
     # 异常检测
@@ -471,6 +486,13 @@ def _evaluate_segment(segment: SegmentAssessmentPayload) -> Dict[str, Any]:
             "age_years": round(age, 1),
             "prediction_years": prediction_years,
             "aadtt_k_per_day": round(float(section.aadtt), 4),
+            "traffic_growth_rate": round(float(getattr(section, "traffic_growth_rate", 0.02)), 4),
+            "avg_lef": round(float(getattr(section, "avg_lef", 1.0)), 4),
+            "asphalt_thickness_m": round(float(section.asphalt_thickness), 3),
+            "base_thickness_m": round(float(section.base_thickness), 3),
+            "comp_pct": round(float(getattr(section, "comp", 95.0)), 1),
+            "defl_mm": round(float(getattr(section, "defl", 0.5)), 2),
+            "mmp_mm_per_month": round(float(getattr(section, "mmp", 50.0)), 1),
             "pixel_to_meter": pixel_to_meter,
             "distress_values": {k: round(v, 4) for k, v in distress_values.items()},
         },
